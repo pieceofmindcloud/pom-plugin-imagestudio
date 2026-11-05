@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "plugin_code": "comfyui",
+  "plugin_abi": 1,
+  "feature_set": [
+    "comfyui.core"
+  ],
+  "preferences": {
+    "features": [
+      {
+        "key": "low_vram",
+        "label": "Low VRAM",
+        "default": false,
+        "description": "Keep ComfyUI's weights in system RAM and move them to the GPU per step (--lowvram). Use it when POM's own models hold most of the GPU."
+      },
+      {
+        "key": "cpu_only",
+        "label": "CPU only",
+        "default": false,
+        "description": "Install the CPU build of PyTorch and run everything on the CPU (--cpu). Slow; for machines without a supported GPU."
+      }
+    ]
+  }
+}

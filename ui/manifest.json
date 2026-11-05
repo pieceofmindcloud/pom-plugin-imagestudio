@@ -1,0 +1,78 @@
+{
+  "schema": "pom-plugin-ui/v1",
+  "plugin_code": "comfyui",
+  "lifecycle": "on_demand",
+  "icon_image": "ui/icon.png",
+  "description": {
+    "en": "ComfyUI, the node-based studio for image, video and audio generation, running inside POM next to the models your cluster serves. One click installs a pinned, verified ComfyUI with the PyTorch build that matches the machine's GPU; nothing is needed on the host beforehand.\n\nWhat you get:\n- The full ComfyUI editor in POM: workflows, templates, the queue, the model library and the image gallery.\n- POM nodes: POM Chat, POM Prompt Enhancer and POM Describe Image call the language and vision models deployed on your POM cluster, so prompts are written and images are captioned by your own machines.\n- Your models, inputs, outputs and workflows live in the POM workspace (.comfyui), outside the runtime, and survive updates.\n- Preferences for machines that share the GPU with POM's own models (low VRAM) or have none (CPU only).\n\nOpens on demand and stops completely when you close it from the menu.",
+    "pt-BR": "ComfyUI, o estúdio baseado em nós para gerar imagens, vídeos e áudio, rodando dentro do POM ao lado dos modelos que o seu cluster serve. Um clique instala um ComfyUI fixado e verificado, com o PyTorch que corresponde à GPU da máquina; nada é necessário no host antes.\n\nO que você ganha:\n- O editor completo do ComfyUI no POM: workflows, modelos prontos, a fila, a biblioteca de modelos e a galeria de imagens.\n- Nós POM: POM Chat, POM Prompt Enhancer e POM Describe Image chamam os modelos de linguagem e visão implantados no seu cluster POM, para que os prompts sejam escritos e as imagens descritas pelas suas próprias máquinas.\n- Seus modelos, entradas, saídas e workflows ficam no workspace do POM (.comfyui), fora do runtime, e sobrevivem às atualizações.\n- Preferências para máquinas que dividem a GPU com os modelos do POM (pouca VRAM) ou que não têm GPU (só CPU).\n\nAbre sob demanda e para por completo quando você o fecha pelo menu."
+  },
+  "screenshots": [
+    "docs/screenshots/main.png"
+  ],
+  "documentation": {
+    "guides": [
+      {
+        "id": "getting-started",
+        "title": {
+          "en": "Getting started",
+          "pt-BR": "Primeiros passos"
+        },
+        "asset": "docs/getting-started.md"
+      }
+    ],
+    "reference": []
+  },
+  "menu": [
+    {
+      "id": "comfyui",
+      "label": {
+        "en": "ComfyUI",
+        "pt-BR": "ComfyUI"
+      },
+      "icon": "blocks",
+      "to": "/main"
+    }
+  ],
+  "routes": [
+    {
+      "path": "/main",
+      "screen": "main",
+      "full_bleed": true
+    }
+  ],
+  "screens": {
+    "main": {
+      "module": "ui/screens.js",
+      "export": "main",
+      "styles": [
+        "ui/plugin.css"
+      ]
+    }
+  },
+  "i18n": {
+    "en": "i18n/en.json",
+    "pt-BR": "i18n/pt-BR.json"
+  },
+  "development": {
+    "rebuild": [
+      {
+        "run": [
+          "scripts/dev-ui.sh"
+        ],
+        "os": [
+          "linux",
+          "macos"
+        ]
+      }
+    ]
+  },
+  "assets": [
+    "ui/screens.js",
+    "ui/plugin.css",
+    "ui/icon.png",
+    "i18n/en.json",
+    "i18n/pt-BR.json",
+    "docs/getting-started.md"
+  ]
+}

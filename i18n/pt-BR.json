@@ -1,0 +1,12 @@
+{
+  "main.title": "ComfyUI",
+  "main.hostTooOld": "Este plugin ComfyUI precisa de um POM mais novo (plugin host versão 7). Atualize o POM para usá-lo.",
+  "loader.installing": "Instalando o ComfyUI",
+  "loader.updating": "Atualizando o ComfyUI",
+  "loader.stopped": "O ComfyUI parou",
+  "step.source": "Baixando o ComfyUI",
+  "step.uv": "Preparando o instalador",
+  "step.python": "Baixando o runtime Python",
+  "step.packages": "Instalando o PyTorch e os pacotes do ComfyUI (vários GB)",
+  "step.starting": "Iniciando o ComfyUI"
+}
