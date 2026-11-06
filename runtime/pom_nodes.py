@@ -201,8 +201,11 @@ _downloads = {}
 _downloads_lock = threading.Lock()
 
 
-def _download_target(url, name, directory):
-    """The file a download writes, or a ValueError the dialog can show."""
+HEADROOM = 512 * 2**20
+
+
+def _validate(url, name, directory):
+    """Refuse what the dialog must not download, with a message it can show."""
     import folder_paths
 
     parsed = urllib.parse.urlparse(url or "")
@@ -214,30 +217,128 @@ def _download_target(url, name, directory):
         raise ValueError("Not a model file")
     if directory not in folder_paths.folder_names_and_paths:
         raise ValueError(f"Unknown model folder: {directory}")
+
+
+def relative_destination(url, name):
+    """Where a download goes inside a POM model folder, in the layout the
+    folders already use: `<org>/<repo>/<file>` from a Hugging Face URL,
+    `civitai/<version id>/<file>` from a Civitai one."""
+    parsed = urllib.parse.urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    if (parsed.hostname or "").lower().startswith("civitai."):
+        version = parts[-1] if parts else "models"
+        return "/".join(["civitai", version, name])
+    if len(parts) >= 2:
+        return "/".join([parts[0], parts[1], name])
+    return name
+
+
+def choose_root(dirs, size, free=shutil.disk_usage):
+    """The first folder with room for the file and some headroom."""
+    for root in dirs:
+        try:
+            if free(root).free >= size + HEADROOM:
+                return root
+        except OSError:
+            continue
+    return None
+
+
+def _model_dirs():
+    return [d for d in os.environ.get("POM_MODEL_DIRS", "").split("\n") if d]
+
+
+def _comfy_target(name, directory):
+    """Without POM's folders (an older node): ComfyUI's own models folder."""
+    import folder_paths
+
     paths = folder_paths.get_folder_paths(directory)
     folder = next((path for path in paths if os.path.basename(path) == directory), paths[0])
     return os.path.join(folder, name)
 
 
+def _existing(url, name, directory):
+    """The file when it is already on this machine, else None."""
+    dirs = _model_dirs()
+    if not dirs:
+        target = _comfy_target(name, directory)
+        return target if os.path.exists(target) else None
+    relative = relative_destination(url, name)
+    for root in dirs:
+        target = os.path.join(root, *relative.split("/"))
+        if os.path.exists(target):
+            return target
+    return None
+
+
+def _host_api_post(path):
+    base = os.environ.get("POM_HOST_API_URL", "")
+    token = os.environ.get("POM_HOST_API_TOKEN", "")
+    if not base or not token:
+        return
+    request = urllib.request.Request(base + path, data=b"{}", method="POST")
+    request.add_header("x-pom-plugin-host-token", token)
+    request.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(request, timeout=30) as response:
+        response.read()
+
+
+def sync_links():
+    """Expose POM's catalog in ComfyUI's folders (filled in by the link sync)."""
+
+
+def _after_download():
+    try:
+        _host_api_post("/catalog/refresh")
+    except Exception as error:
+        print(f"[POM] catalog refresh failed: {error}")
+    try:
+        sync_links()
+    except Exception as error:
+        print(f"[POM] model link sync failed: {error}")
+
+
 def _publish(state):
     from server import PromptServer
 
-    PromptServer.instance.send_sync("pom-download", dict(state))
+    PromptServer.instance.send_sync("pom-download", _public(state))
 
 
-def _fetch(state, url, target):
-    partial = target + ".part"
+def _public(state):
+    return {key: value for key, value in state.items() if key != "url"}
+
+
+def new_state(url, name, directory):
+    return {"url": url, "name": name, "directory": directory, "path": "", "total": 0,
+            "received": 0, "status": "downloading", "error": ""}
+
+
+def _fetch(state):
+    partial = None
     try:
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        request = urllib.request.Request(url, headers={"User-Agent": "POM-ComfyUI"})
+        request = urllib.request.Request(state["url"], headers={"User-Agent": "POM-ComfyUI"})
         with urllib.request.urlopen(request, timeout=60) as response:
             total = int(response.headers.get("Content-Length") or 0)
             state["total"] = total
-            free = shutil.disk_usage(os.path.dirname(target)).free
-            if total and total > free:
-                raise RuntimeError(
-                    f"Not enough disk space: {total / 2**30:.1f} GiB needed, "
-                    f"{free / 2**30:.1f} GiB free")
+            dirs = _model_dirs()
+            if dirs:
+                root = choose_root(dirs, total)
+                if root is None:
+                    raise RuntimeError(
+                        f"Not enough disk space in any model folder for {total / 2**30:.1f} GiB")
+                relative = relative_destination(state["url"], state["name"])
+                target = os.path.join(root, *relative.split("/"))
+            else:
+                target = _comfy_target(state["name"], state["directory"])
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                free = shutil.disk_usage(os.path.dirname(target)).free
+                if total and total > free:
+                    raise RuntimeError(
+                        f"Not enough disk space: {total / 2**30:.1f} GiB needed, "
+                        f"{free / 2**30:.1f} GiB free")
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            state["path"] = target
+            partial = target + ".part"
             published = 0.0
             with open(partial, "wb") as out:
                 while chunk := response.read(1 << 20):
@@ -250,31 +351,35 @@ def _fetch(state, url, target):
             raise RuntimeError("The download was cut short")
         os.replace(partial, target)
         state["status"] = "done"
+        _after_download()
     except Exception as error:
         state["status"] = "error"
         state["error"] = str(error)[:300]
-        try:
-            os.remove(partial)
-        except OSError:
-            pass
+        if partial:
+            try:
+                os.remove(partial)
+            except OSError:
+                pass
     _publish(state)
 
 
 def start_download(url, name, directory):
-    target = _download_target(url, name, directory)
+    _validate(url, name, directory)
+    key = (url, name)
     with _downloads_lock:
-        current = _downloads.get(target)
+        current = _downloads.get(key)
         if current and current["status"] == "downloading":
-            return current
-        state = {"name": name, "directory": directory, "total": 0, "received": 0,
-                 "status": "downloading", "error": ""}
-        if os.path.exists(target):
-            state.update(status="done", total=os.path.getsize(target), received=os.path.getsize(target))
-            _downloads[target] = state
-            return state
-        _downloads[target] = state
-    threading.Thread(target=_fetch, args=(state, url, target), daemon=True).start()
-    return state
+            return _public(current)
+        state = new_state(url, name, directory)
+        existing = _existing(url, name, directory)
+        if existing:
+            size = os.path.getsize(existing)
+            state.update(status="done", path=existing, total=size, received=size)
+            _downloads[key] = state
+            return _public(state)
+        _downloads[key] = state
+    threading.Thread(target=_fetch, args=(state,), daemon=True).start()
+    return _public(state)
 
 
 def _register_routes():
@@ -297,7 +402,7 @@ def _register_routes():
     @routes.get("/pom/models/downloads")
     async def downloads(request):
         with _downloads_lock:
-            return web.json_response([dict(state) for state in _downloads.values()])
+            return web.json_response([_public(state) for state in _downloads.values()])
 
 
 def _prepare_user_directory():

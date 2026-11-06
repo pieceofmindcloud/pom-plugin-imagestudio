@@ -48,7 +48,7 @@ function update(state) {
   render();
   if (previous?.status !== "downloading" || state.status === "downloading") return;
   if (state.status === "done") {
-    toast("success", "Model downloaded", `${state.directory}/${state.name}`);
+    toast("success", "Model downloaded", state.path || `${state.directory}/${state.name}`);
     app.refreshComboInNodes?.();
   } else {
     toast("error", "Model download failed", `${state.name}: ${state.error}`);
@@ -67,7 +67,7 @@ async function downloadModel(url, name, directory) {
     return false;
   }
   if (state.status === "done") {
-    toast("info", "Model already on the server", `${directory}/${name}`);
+    toast("info", "Model already on the server", state.path || `${directory}/${name}`);
     app.refreshComboInNodes?.();
   } else {
     toast("info", "Downloading on the POM server", `${directory}/${name}`);
