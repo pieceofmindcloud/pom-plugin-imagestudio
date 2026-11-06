@@ -217,20 +217,26 @@ def _validate(url, name, directory):
         raise ValueError("Not a model file")
     if directory not in folder_paths.folder_names_and_paths:
         raise ValueError(f"Unknown model folder: {directory}")
+    relative_destination(url, name)
 
 
 def relative_destination(url, name):
     """Where a download goes inside a POM model folder, in the layout the
     folders already use: `<org>/<repo>/<file>` from a Hugging Face URL,
-    `civitai/<version id>/<file>` from a Civitai one."""
+    `civitai/<version id>/<file>` from a Civitai one. A URL that does not
+    name both (or that carries `.`/`..` segments) is refused, so a crafted
+    link in a shared workflow cannot point outside the folder."""
     parsed = urllib.parse.urlparse(url)
-    parts = [part for part in parsed.path.split("/") if part]
+    raw = [urllib.parse.unquote(part) for part in parsed.path.split("/") if part]
+    if any(part in (".", "..") or "/" in part or "\\" in part for part in raw):
+        raise ValueError("Invalid model URL")
     if (parsed.hostname or "").lower().startswith("civitai."):
-        version = parts[-1] if parts else "models"
-        return "/".join(["civitai", version, name])
-    if len(parts) >= 2:
-        return "/".join([parts[0], parts[1], name])
-    return name
+        if not raw or not raw[-1].isdigit():
+            raise ValueError("Invalid Civitai model URL")
+        return "/".join(["civitai", raw[-1], name])
+    if len(raw) < 3:
+        raise ValueError("Invalid model URL")
+    return "/".join([raw[0], raw[1], name])
 
 
 def choose_root(dirs, size, free=shutil.disk_usage):
@@ -328,6 +334,7 @@ def sync_links_to(models_dir, plan):
                     os.remove(path)
             if current != link_root and not os.listdir(current):
                 os.rmdir(current)
+    registered = set()
     for link, target in plan.items():
         if os.path.islink(link):
             if os.readlink(link) == target:
@@ -338,8 +345,20 @@ def sync_links_to(models_dir, plan):
         os.makedirs(os.path.dirname(link), exist_ok=True)
         try:
             os.symlink(target, link)
-        except OSError as error:  # Windows without the symlink privilege
-            print(f"[POM] cannot link {target} into ComfyUI: {error}")
+        except OSError as error:
+            # Windows without the symlink privilege: register the file's own
+            # folder with ComfyUI instead (its other files show up too).
+            folder = os.path.relpath(link, models_dir).split(os.sep)[0]
+            key = (folder, os.path.dirname(target))
+            if key in registered:
+                continue
+            registered.add(key)
+            try:
+                import folder_paths
+
+                folder_paths.add_model_folder_path(*key)
+            except Exception:
+                print(f"[POM] cannot link {target} into ComfyUI: {error}")
 
 
 def _host_api_get(path):
@@ -407,6 +426,9 @@ def _fetch(state):
                         f"Not enough disk space in any model folder for {total / 2**30:.1f} GiB")
                 relative = relative_destination(state["url"], state["name"])
                 target = os.path.join(root, *relative.split("/"))
+                inside = os.path.realpath(root) + os.sep
+                if not os.path.realpath(target).startswith(inside):
+                    raise RuntimeError("The download would land outside the model folder")
             else:
                 target = _comfy_target(state["name"], state["directory"])
                 os.makedirs(os.path.dirname(target), exist_ok=True)

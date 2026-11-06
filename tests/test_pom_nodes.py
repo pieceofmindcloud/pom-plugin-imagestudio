@@ -87,6 +87,15 @@ class Destinations(unittest.TestCase):
             self.assertEqual(pom_nodes.relative_destination(url, "x.safetensors"),
                              "civitai/12345/x.safetensors")
 
+    def test_dot_segments_cannot_escape(self):
+        for url in ("https://huggingface.co/../../evil/resolve/main/x.safetensors",
+                    "https://huggingface.co/./../repo/resolve/main/x.safetensors",
+                    "https://huggingface.co/x.safetensors",
+                    "https://civitai.com/api/download/models/..",
+                    "https://civitai.com/"):
+            with self.assertRaises(ValueError, msg=url):
+                pom_nodes.relative_destination(url, "x.safetensors")
+
     def test_picks_the_first_folder_with_room(self):
         gib = 2**30
         space = {"/full": 1 * gib, "/roomy": 50 * gib}
@@ -196,6 +205,25 @@ class Links(unittest.TestCase):
         pom_nodes.sync_links_to(self.models, {})
         self.assertTrue(os.path.isfile(mine))
         self.assertTrue(os.path.isfile(inside))
+
+    def test_without_symlinks_the_folder_is_registered(self):
+        registered = []
+        folder_paths = sys.modules["folder_paths"]
+        folder_paths.add_model_folder_path = lambda folder, path: registered.append((folder, path))
+        original = os.symlink
+
+        def refuse(*args, **kwargs):
+            raise OSError("A required privilege is not held by the client")
+
+        os.symlink = refuse
+        try:
+            plan = pom_nodes.plan_links([_file(self.vae, "vae", name="a/b/ae.safetensors")],
+                                        self.models)
+            pom_nodes.sync_links_to(self.models, plan)
+        finally:
+            os.symlink = original
+            del folder_paths.add_model_folder_path
+        self.assertEqual(registered, [("vae", os.path.dirname(self.vae))])
 
     def test_sync_is_idempotent(self):
         plan = pom_nodes.plan_links([_file(self.vae, "vae", name="a/b/ae.safetensors"),
