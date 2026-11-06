@@ -52,10 +52,12 @@ class _Server:
                 pass
 
             def do_GET(self):
+                body = (b'{"image_files": []}' if self.path.startswith("/api/plugin-host/")
+                        else owner.payload)
                 self.send_response(200)
-                self.send_header("Content-Length", str(len(owner.payload)))
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                self.wfile.write(owner.payload)
+                self.wfile.write(body)
 
             def do_POST(self):
                 owner.refreshes.append((self.path, self.headers.get("x-pom-plugin-host-token")))
@@ -138,6 +140,71 @@ class Downloads(unittest.TestCase):
         state = self._fetch(self.server.url + "/a/b/resolve/main/ae.safetensors")
         self.assertEqual(state["status"], "done", state["error"])
         self.assertEqual(state["path"], os.path.join(COMFY_MODELS, "vae", "ae.safetensors"))
+
+
+def _file(path, category, error=None, name=None):
+    return {"path": path, "name": name or os.path.basename(path), "category": category,
+            "metadata_error": error}
+
+
+class Links(unittest.TestCase):
+    def setUp(self):
+        self.models = tempfile.mkdtemp(prefix="pom-comfy-links-")
+        self.store = tempfile.mkdtemp(prefix="pom-store-")
+        self.vae = os.path.join(self.store, "ae.safetensors")
+        self.unet = os.path.join(self.store, "z.safetensors")
+        for path in (self.vae, self.unet):
+            Path(path).write_bytes(b"x")
+
+    def test_plan_links_maps_categories(self):
+        plan = pom_nodes.plan_links([
+            _file(self.vae, "vae", name="Comfy-Org/z/ae.safetensors"),
+            _file(self.unet, "diffusion", name="Comfy-Org/z/z.safetensors"),
+            _file(self.unet, "other", name="x/y/other.safetensors"),
+            _file(self.vae, "vae", error="cut short", name="x/y/broken.safetensors"),
+        ], self.models)
+        self.assertEqual(plan, {
+            os.path.join(self.models, "vae", "pom", "Comfy-Org", "z", "ae.safetensors"): self.vae,
+            os.path.join(self.models, "diffusion_models", "pom", "Comfy-Org", "z",
+                         "z.safetensors"): self.unet,
+        })
+        self.assertEqual(pom_nodes.CATEGORY_FOLDERS["text_encoder"], "text_encoders")
+        self.assertEqual(pom_nodes.CATEGORY_FOLDERS["upscale"], "upscale_models")
+        self.assertNotIn("other", pom_nodes.CATEGORY_FOLDERS)
+
+    def test_sync_creates_the_links(self):
+        plan = pom_nodes.plan_links([_file(self.vae, "vae", name="a/b/ae.safetensors")], self.models)
+        pom_nodes.sync_links_to(self.models, plan)
+        link = os.path.join(self.models, "vae", "pom", "a", "b", "ae.safetensors")
+        self.assertEqual(os.path.realpath(link), os.path.realpath(self.vae))
+
+    def test_stale_links_are_removed(self):
+        first = pom_nodes.plan_links([_file(self.vae, "vae", name="a/b/ae.safetensors")], self.models)
+        pom_nodes.sync_links_to(self.models, first)
+        pom_nodes.sync_links_to(self.models, {})
+        self.assertFalse(os.path.lexists(os.path.join(self.models, "vae", "pom", "a", "b",
+                                                      "ae.safetensors")))
+        self.assertFalse(os.path.exists(os.path.join(self.models, "vae", "pom", "a")))
+
+    def test_only_links_under_pom_are_touched(self):
+        mine = os.path.join(self.models, "vae", "mine.safetensors")
+        os.makedirs(os.path.dirname(mine))
+        Path(mine).write_bytes(b"user")
+        inside = os.path.join(self.models, "vae", "pom", "regular.safetensors")
+        os.makedirs(os.path.dirname(inside))
+        Path(inside).write_bytes(b"user")
+        pom_nodes.sync_links_to(self.models, {})
+        self.assertTrue(os.path.isfile(mine))
+        self.assertTrue(os.path.isfile(inside))
+
+    def test_sync_is_idempotent(self):
+        plan = pom_nodes.plan_links([_file(self.vae, "vae", name="a/b/ae.safetensors"),
+                                     _file(self.unet, "diffusion", name="a/b/z.safetensors")],
+                                    self.models)
+        pom_nodes.sync_links_to(self.models, plan)
+        before = sorted(str(p) for p in Path(self.models).rglob("*"))
+        pom_nodes.sync_links_to(self.models, plan)
+        self.assertEqual(sorted(str(p) for p in Path(self.models).rglob("*")), before)
 
 
 if __name__ == "__main__":

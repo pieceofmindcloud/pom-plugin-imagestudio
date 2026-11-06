@@ -283,8 +283,87 @@ def _host_api_post(path):
         response.read()
 
 
+# --- POM's catalog in ComfyUI's folders --------------------------------------
+
+# ComfyUI folder of each catalog category; `other` is not exposed.
+CATEGORY_FOLDERS = {
+    "diffusion": "diffusion_models",
+    "text_encoder": "text_encoders",
+    "vae": "vae",
+    "checkpoint": "checkpoints",
+    "lora": "loras",
+    "controlnet": "controlnet",
+    "clip_vision": "clip_vision",
+    "upscale": "upscale_models",
+}
+LINK_DIR = "pom"
+
+
+def plan_links(files, models_dir):
+    """`<models_dir>/<folder>/pom/<name>` -> the file, for every readable
+    catalog entry whose category ComfyUI has a folder for."""
+    plan = {}
+    for entry in files:
+        folder = CATEGORY_FOLDERS.get(entry.get("category"))
+        name = entry.get("name") or ""
+        parts = [part for part in name.replace("\\", "/").split("/") if part not in ("", ".", "..")]
+        if not folder or entry.get("metadata_error") or not parts or not entry.get("path"):
+            continue
+        plan[os.path.join(models_dir, folder, LINK_DIR, *parts)] = entry["path"]
+    return plan
+
+
+def sync_links_to(models_dir, plan):
+    """Make `<folder>/pom/` hold exactly the planned links. Only symbolic
+    links under `pom/` are created or removed; a regular file (the user's
+    own) is never touched."""
+    for folder in set(CATEGORY_FOLDERS.values()):
+        link_root = os.path.join(models_dir, folder, LINK_DIR)
+        if not os.path.isdir(link_root):
+            continue
+        for current, dirs, names in os.walk(link_root, topdown=False):
+            for name in names + dirs:
+                path = os.path.join(current, name)
+                if os.path.islink(path) and path not in plan:
+                    os.remove(path)
+            if current != link_root and not os.listdir(current):
+                os.rmdir(current)
+    for link, target in plan.items():
+        if os.path.islink(link):
+            if os.readlink(link) == target:
+                continue
+            os.remove(link)
+        elif os.path.lexists(link):
+            continue
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        try:
+            os.symlink(target, link)
+        except OSError as error:  # Windows without the symlink privilege
+            print(f"[POM] cannot link {target} into ComfyUI: {error}")
+
+
+def _host_api_get(path):
+    base = os.environ.get("POM_HOST_API_URL", "")
+    token = os.environ.get("POM_HOST_API_TOKEN", "")
+    if not base or not token:
+        return None
+    request = urllib.request.Request(base + path)
+    request.add_header("x-pom-plugin-host-token", token)
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read())
+
+
 def sync_links():
-    """Expose POM's catalog in ComfyUI's folders (filled in by the link sync)."""
+    """Expose this node's image catalog in ComfyUI's model folders. Without
+    the node's API (an older node) nothing changes."""
+    import folder_paths
+
+    answer = _host_api_get("/catalog/images")
+    if answer is None:
+        return 0
+    plan = plan_links(answer.get("image_files", []), folder_paths.models_dir)
+    sync_links_to(folder_paths.models_dir, plan)
+    return len(plan)
 
 
 def _after_download():
@@ -399,6 +478,16 @@ def _register_routes():
             return web.json_response({"error": "Invalid request"}, status=400)
         return web.json_response(dict(state))
 
+    @routes.post("/pom/models/sync")
+    async def sync(request):
+        import asyncio
+
+        try:
+            count = await asyncio.get_running_loop().run_in_executor(None, sync_links)
+        except Exception as error:
+            return web.json_response({"error": str(error)[:300]}, status=502)
+        return web.json_response({"linked": count})
+
     @routes.get("/pom/models/downloads")
     async def downloads(request):
         with _downloads_lock:
@@ -414,6 +503,17 @@ def _prepare_user_directory():
     for directory in ("workflows", "subgraphs"):
         os.makedirs(os.path.join(user, directory), exist_ok=True)
 
+
+def _sync_in_background():
+    try:
+        sync_links()
+    except Exception as error:
+        print(f"[POM] model link sync failed: {error}")
+
+
+if os.environ.get("POM_HOST_API_URL"):
+    # ComfyUI's start never waits on the node.
+    threading.Thread(target=_sync_in_background, daemon=True).start()
 
 try:
     _register_routes()

@@ -545,6 +545,30 @@ mod live {
             |_, _| {},
         )
         .unwrap();
+        // A fake node API whose image catalog holds one VAE file.
+        let store = base.join("store");
+        fs::create_dir_all(&store).unwrap();
+        let vae = store.join("ae.safetensors");
+        fs::write(&vae, b"not real weights").unwrap();
+        let catalog = serde_json::json!({"image_files": [{
+            "path": vae, "name": "a/b/ae.safetensors", "category": "vae", "metadata_error": null
+        }]})
+        .to_string();
+        let node = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let node_port = node.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in node.incoming().flatten() {
+                let mut stream = stream;
+                let mut request = [0u8; 4096];
+                let _ = io::Read::read(&mut stream, &mut request);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    catalog.len(),
+                    catalog
+                );
+            }
+        });
         let log = fs::File::create(base.join("e2e-bridge.log")).unwrap();
         let mut bridge = Command::new(&python)
             .arg("-I")
@@ -552,6 +576,11 @@ mod live {
             .args([&base, &source, &home])
             .env("POM_OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
             .env("POM_API_KEY", "sk-e2e")
+            .env(
+                "POM_HOST_API_URL",
+                format!("http://127.0.0.1:{node_port}/api/plugin-host"),
+            )
+            .env("POM_HOST_API_TOKEN", "host-e2e")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(log)
@@ -584,6 +613,16 @@ mod live {
         assert!(get("/").unwrap().contains("<html"));
         let info = get("/api/object_info/POMChat").unwrap();
         assert!(info.contains("POM gateway unavailable"), "{info}");
+        // The catalog's VAE is linked under `vae/pom/` and listed by ComfyUI.
+        let mut listed = String::new();
+        for _ in 0..30 {
+            listed = get("/api/models/vae").unwrap();
+            if listed.contains("pom/a/b/ae.safetensors") {
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        assert!(listed.contains("pom/a/b/ae.safetensors"), "{listed}");
         drop(bridge.stdin.take());
         assert!(bridge.wait().unwrap().success());
     }

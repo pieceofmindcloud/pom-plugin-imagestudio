@@ -84,6 +84,14 @@ app.registerExtension({
       isRemote: () => false,
     });
     api.addEventListener("pom-download", ({ detail }) => update(detail));
+    // POM's catalog may have changed since ComfyUI started (a file copied or
+    // downloaded on the node): relink it and reload the model lists.
+    try {
+      const synced = await api.fetchApi("/pom/models/sync", { method: "POST" });
+      if (synced.ok) app.refreshComboInNodes?.();
+    } catch {
+      // Without the node's API the lists keep ComfyUI's own folders.
+    }
     try {
       const response = await api.fetchApi("/pom/models/downloads");
       if (response.ok) for (const state of await response.json()) update(state);
