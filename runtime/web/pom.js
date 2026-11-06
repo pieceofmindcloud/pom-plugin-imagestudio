@@ -100,3 +100,165 @@ app.registerExtension({
     }
   },
 });
+
+// --- Deploy on POM (admins) --------------------------------------------------
+// An admin node deploys an image model by component from here, as on POM's
+// deploy screen: per component a file of that kind and a machine that holds
+// it. `/pom/deploy/*` relays to the node, which checks the role and choices.
+
+const COMPONENTS = [
+  ["diffusion", "Diffusion model"],
+  ["text_encoder", "Text encoder"],
+  ["vae", "VAE"],
+];
+
+function element(tag, attributes = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attributes)) {
+    if (key === "style") node.style.cssText = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else node.setAttribute(key, value);
+  }
+  node.append(...children);
+  return node;
+}
+
+async function deployCall(action, body) {
+  const response = await api.fetchApi(`/pom/deploy/${action}`, body === undefined
+    ? {}
+    : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const answer = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(answer.error || `HTTP ${response.status}`);
+  return answer;
+}
+
+/** The choices of one component: each machine with ComfyUI and a file that fits. */
+function choicesFor(component, machines) {
+  const choices = [];
+  for (const machine of machines) {
+    if (!machine.has_image_service) continue;
+    for (const file of machine.image_files || []) {
+      if (file.category === component || file.category === "checkpoint") {
+        choices.push({ node_id: machine.node_id, path: file.path, label: `${file.name} · ${machine.hostname}` });
+      }
+    }
+  }
+  return choices;
+}
+
+async function openDeployDialog() {
+  const field = "width:100%;box-sizing:border-box;margin:4px 0 10px;padding:6px;border-radius:6px;" +
+    "border:1px solid var(--border-color,#444);background:var(--comfy-input-bg,#111);color:inherit";
+  const status = element("p", { style: "min-height:1.2em;margin:6px 0;color:var(--error-text,#f88)" });
+  const deployed = element("div");
+  const body = element("div", {}, "Loading the network's image files…");
+  const close = () => overlay.remove();
+  const box = element(
+    "div",
+    {
+      role: "dialog",
+      "aria-label": "Deploy on POM",
+      style: "width:min(560px,92vw);max-height:86vh;overflow:auto;padding:16px 18px;border-radius:10px;" +
+        "background:var(--comfy-menu-bg,#222);color:var(--fg-color,#ddd);font:13px/1.5 sans-serif",
+    },
+    element("h3", { style: "margin:0 0 8px" }, "Deploy an image model on POM"),
+    element("p", { style: "margin:0 0 12px;opacity:.75" },
+      "Each part runs on a machine of the network that already holds its file. Nothing is copied."),
+    body,
+    status,
+    element("h4", { style: "margin:14px 0 6px" }, "Served image models"),
+    deployed,
+  );
+  const overlay = element(
+    "div",
+    { style: "position:fixed;inset:0;z-index:10001;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.5)",
+      onclick: (event) => { if (event.target === overlay) close(); } },
+    box,
+  );
+  document.body.append(overlay);
+
+  async function listDeployed() {
+    try {
+      const { deployments = [] } = await deployCall("deployments");
+      deployed.replaceChildren(
+        ...(deployments.length ? deployments.map((deployment) => element(
+          "div",
+          { style: "display:flex;justify-content:space-between;gap:8px;align-items:center;padding:6px 0;border-top:1px solid var(--border-color,#333)" },
+          element("span", {}, `${deployment.name} - ${deployment.components.map((part) => `${part.component} on ${part.hostname} (${part.status})`).join(", ")}`),
+          element("button", { type: "button", onclick: async () => {
+            try {
+              await deployCall("undeploy", { deploy_id: deployment.deploy_id });
+              toast("success", "Undeployed", deployment.name);
+              listDeployed();
+            } catch (error) {
+              status.textContent = error.message;
+            }
+          } }, "Undeploy"),
+        )) : [element("p", { style: "opacity:.7;margin:0" }, "None yet.")]),
+      );
+    } catch (error) {
+      deployed.replaceChildren(element("p", {}, error.message));
+    }
+  }
+
+  let machines = [];
+  try {
+    ({ machines = [] } = await deployCall("files"));
+  } catch (error) {
+    body.replaceChildren(element("p", {}, error.message));
+    listDeployed();
+    return;
+  }
+  const name = element("input", { style: field, placeholder: "Z-Image Turbo", "aria-label": "Name" });
+  const selects = COMPONENTS.map(([component, label]) => {
+    const choices = choicesFor(component, machines);
+    const select = element("select", { style: field, "aria-label": label },
+      element("option", { value: "" }, choices.length ? "Not used" : "No machine with ComfyUI holds one"),
+      ...choices.map((choice, index) => element("option", { value: String(index) }, choice.label)));
+    return { component, label, select, choices };
+  });
+  const submit = element("button", { type: "button", style: "padding:6px 14px", onclick: async () => {
+    const components = selects
+      .filter(({ select }) => select.value !== "")
+      .map(({ component, select, choices }) => {
+        const { node_id, path } = choices[Number(select.value)];
+        return { component, node_id, path };
+      });
+    status.textContent = "";
+    submit.disabled = true;
+    try {
+      const { deploy_id } = await deployCall("deploy", { name: name.value.trim(), components });
+      toast("success", "Deployed on POM", `${name.value.trim()} (${deploy_id})`);
+      app.refreshComboInNodes?.();
+      listDeployed();
+    } catch (error) {
+      status.textContent = error.message;
+    } finally {
+      submit.disabled = false;
+    }
+  } }, "Deploy");
+  body.replaceChildren(
+    element("label", {}, "Name", name),
+    ...selects.map(({ label, select }) => element("label", {}, label, select)),
+    element("div", { style: "display:flex;gap:8px;justify-content:flex-end" },
+      element("button", { type: "button", style: "padding:6px 14px", onclick: close }, "Close"),
+      submit),
+  );
+  listDeployed();
+}
+
+// Offered only when this node may deploy; the node checks again on every call.
+let deployRole = { admin: false };
+try {
+  const response = await api.fetchApi("/pom/deploy/role");
+  if (response.ok) deployRole = await response.json();
+} catch {
+  // An older node, or none: no deploy command.
+}
+if (deployRole.admin) {
+  app.registerExtension({
+    name: "pom.deploy",
+    commands: [{ id: "pom.deploy.open", label: "Deploy on POM", icon: "pi pi-cloud-upload", function: openDeployDialog }],
+    menuCommands: [{ path: ["POM"], commands: ["pom.deploy.open"] }],
+  });
+}

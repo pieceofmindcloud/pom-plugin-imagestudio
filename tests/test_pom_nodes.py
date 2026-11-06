@@ -267,3 +267,96 @@ class Links(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _Node:
+    """A fake node host API for the deploy relay: `role` answers
+    `/node`, the image routes record what they get and answer
+    `status` with `body`."""
+
+    def __init__(self):
+        import json
+
+        self.role, self.status, self.body, self.calls = "admin", 200, {"ok": True}, []
+        owner = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _answer(self, status, body):
+                data = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _record(self, body):
+                owner.calls.append((self.command, self.path, self.headers.get("x-pom-plugin-host-token"), body))
+
+            def do_GET(self):
+                self._record(None)
+                if self.path.endswith("/node"):
+                    self._answer(200, {"node_id": "n", "role": owner.role})
+                else:
+                    self._answer(owner.status, owner.body)
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                self._record(json.loads(self.rfile.read(length) or b"null"))
+                self._answer(owner.status, owner.body)
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/api/plugin-host"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+
+class Deploy(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.node = _Node()
+
+    def setUp(self):
+        self.saved = {key: os.environ.get(key) for key in ("POM_HOST_API_URL", "POM_HOST_API_TOKEN")}
+        os.environ["POM_HOST_API_URL"] = self.node.url
+        os.environ["POM_HOST_API_TOKEN"] = "host-token"
+        self.node.role, self.node.status, self.node.body = "admin", 200, {"ok": True}
+        self.node.calls[:] = []
+
+    def tearDown(self):
+        for key, value in self.saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def test_the_deploy_command_is_offered_only_to_admins(self):
+        for role, admin in (("principal", True), ("admin", True), ("member", False), ("visitor", False)):
+            self.node.role = role
+            self.assertEqual(pom_nodes.deploy_role(), {"role": role, "admin": admin}, role)
+        os.environ.pop("POM_HOST_API_URL")
+        self.assertEqual(pom_nodes.deploy_role()["admin"], False, "an older node offers nothing")
+        script = (ROOT / "runtime" / "web" / "pom.js").read_text()
+        self.assertIn("/pom/deploy/role", script)
+        self.assertIn("Deploy on POM", script)
+
+    def test_deploy_relays_to_the_node(self):
+        choice = {"name": "Z", "components": [{"component": "vae", "node_id": "c", "path": "/m/ae.safetensors"}]}
+        self.node.body = {"deploy_id": "img-1"}
+        self.assertEqual(pom_nodes.deploy_relay("deploy", choice), (200, {"deploy_id": "img-1"}))
+        method, path, token, body = self.node.calls[-1]
+        self.assertEqual((method, path, token, body), ("POST", "/api/plugin-host/image-deploy", "host-token", choice))
+        for action, expected in (("deployments", "/api/plugin-host/image-deployments"),
+                                 ("files", "/api/plugin-host/image-files")):
+            pom_nodes.deploy_relay(action, None)
+            self.assertEqual(self.node.calls[-1][:2], ("GET", expected))
+        pom_nodes.deploy_relay("undeploy", {"deploy_id": "img-1"})
+        self.assertEqual(self.node.calls[-1][1], "/api/plugin-host/image-undeploy")
+        # The node decides: its refusal reaches the browser as it is.
+        self.node.status, self.node.body = 403, {"error": "only an admin node deploys"}
+        self.assertEqual(pom_nodes.deploy_relay("deploy", choice), (403, {"error": "only an admin node deploys"}))
+        # Nothing else is relayed.
+        count = len(self.node.calls)
+        self.assertEqual(pom_nodes.deploy_relay("sign", {})[0], 404)
+        self.assertEqual(len(self.node.calls), count)

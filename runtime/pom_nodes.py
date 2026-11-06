@@ -531,6 +531,59 @@ def start_download(url, name, directory):
     return _public(state)
 
 
+# --- Deploying image models from ComfyUI (admins) ----------------------------
+
+# The node's routes the deploy dialog may reach: (method, host API path).
+DEPLOY_ROUTES = {
+    "deployments": ("GET", "/image-deployments"),
+    "files": ("GET", "/image-files"),
+    "deploy": ("POST", "/image-deploy"),
+    "undeploy": ("POST", "/image-undeploy"),
+}
+
+
+def deploy_role():
+    """This node's role, and whether it may deploy (the menu offers "Deploy
+    on POM" only then). Without the node's API nothing is offered."""
+    try:
+        node = _host_api_get("/node")
+    except Exception:
+        node = None
+    role = (node or {}).get("role") or "unknown"
+    return {"role": role, "admin": role in ("principal", "admin")}
+
+
+def deploy_relay(action, body):
+    """Relay a deploy dialog call to the node's host API and answer its
+    `(status, json)` unchanged: the node checks the role and the choices,
+    nothing is decided here."""
+    route = DEPLOY_ROUTES.get(action)
+    base = os.environ.get("POM_HOST_API_URL", "")
+    token = os.environ.get("POM_HOST_API_TOKEN", "")
+    if route is None:
+        return 404, {"error": "unknown deploy action"}
+    if not base or not token:
+        return 503, {"error": "POM's node API is not configured for ComfyUI; reopen it from POM"}
+    method, path = route
+    data = json.dumps(body if body is not None else {}).encode() if method == "POST" else None
+    request = urllib.request.Request(base + path, data=data, method=method)
+    request.add_header("x-pom-plugin-host-token", token)
+    if data is not None:
+        request.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            return response.status, json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as error:
+        raw = error.read()
+        try:
+            answer = json.loads(raw)
+        except ValueError:
+            answer = {"error": raw[:300].decode(errors="replace") or f"HTTP {error.code}"}
+        return error.code, answer
+    except urllib.error.URLError as error:
+        return 502, {"error": f"POM unreachable: {error.reason}"}
+
+
 def _register_routes():
     from aiohttp import web
     from server import PromptServer
@@ -557,6 +610,34 @@ def _register_routes():
         except Exception as error:
             return web.json_response({"error": str(error)[:300]}, status=502)
         return web.json_response({"linked": count})
+
+    async def _relay(action, body):
+        import asyncio
+
+        status, answer = await asyncio.get_running_loop().run_in_executor(None, deploy_relay, action, body)
+        return web.json_response(answer, status=status)
+
+    @routes.get("/pom/deploy/role")
+    async def role(request):
+        import asyncio
+
+        return web.json_response(await asyncio.get_running_loop().run_in_executor(None, deploy_role))
+
+    @routes.get("/pom/deploy/{action}")
+    async def deploy_get(request):
+        return await _relay(request.match_info["action"], None) if request.match_info["action"] in ("deployments", "files") \
+            else web.json_response({"error": "unknown deploy action"}, status=404)
+
+    @routes.post("/pom/deploy/{action}")
+    async def deploy_post(request):
+        action = request.match_info["action"]
+        if action not in ("deploy", "undeploy"):
+            return web.json_response({"error": "unknown deploy action"}, status=404)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid request"}, status=400)
+        return await _relay(action, body)
 
     @routes.get("/pom/models/downloads")
     async def downloads(request):
