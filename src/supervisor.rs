@@ -234,17 +234,11 @@ impl Supervisor {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(log);
-        // The gateway key reaches ComfyUI's POM nodes only through the
-        // private environment of the child, never argv, IPC or a file.
-        match &context.gateway {
-            Some(gateway) => {
-                cmd.env("POM_OPENAI_BASE_URL", &gateway.openai_base_url)
-                    .env("POM_API_KEY", &gateway.api_key);
-            }
-            None => {
-                cmd.env_remove("POM_OPENAI_BASE_URL")
-                    .env_remove("POM_API_KEY");
-            }
+        for (key, value) in bridge_env(&context) {
+            match value {
+                Some(value) => cmd.env(key, value),
+                None => cmd.env_remove(key),
+            };
         }
         #[cfg(target_os = "linux")]
         unsafe {
@@ -390,6 +384,27 @@ impl Drop for Supervisor {
     }
 }
 
+/// The node's secrets and addresses for ComfyUI's POM nodes: set (`Some`) or
+/// removed so a stale value is never inherited (`None`). They travel only in
+/// the child's private environment, never argv, IPC or a file.
+pub fn bridge_env(context: &Context) -> Vec<(&'static str, Option<String>)> {
+    let gateway = context.gateway.as_ref();
+    let host_api = context.host_api.as_ref();
+    let model_dirs = context
+        .model_dirs
+        .iter()
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    vec![
+        ("POM_OPENAI_BASE_URL", gateway.map(|g| g.openai_base_url.clone())),
+        ("POM_API_KEY", gateway.map(|g| g.api_key.clone())),
+        ("POM_MODEL_DIRS", (!model_dirs.is_empty()).then_some(model_dirs)),
+        ("POM_HOST_API_URL", host_api.map(|h| h.base_url.clone())),
+        ("POM_HOST_API_TOKEN", host_api.map(|h| h.token.clone())),
+    ]
+}
+
 /// ComfyUI's command line after the fixed `--listen`/`--port`, one per line.
 pub fn comfy_args(context: &Context) -> Vec<String> {
     let mut args = Vec::new();
@@ -474,6 +489,29 @@ mod tests {
         };
         assert!(!status.public().to_string().contains("secret"));
         assert_eq!(status.upstream()["token"], "secret-secret-secret");
+    }
+
+    #[test]
+    fn the_bridge_gets_the_model_dirs_and_host_api() {
+        let context = Context::from_configure(&json!({
+            "model_dirs": ["/models/full", "/mnt/disk2/models"],
+            "host_api": {"base_url": "http://127.0.0.1:8080/api/plugin-host", "token": "host-secret-token"}
+        }))
+        .unwrap();
+        let env: std::collections::HashMap<_, _> = bridge_env(&context).into_iter().collect();
+        assert_eq!(
+            env["POM_MODEL_DIRS"].as_deref(),
+            Some("/models/full\n/mnt/disk2/models")
+        );
+        assert_eq!(
+            env["POM_HOST_API_URL"].as_deref(),
+            Some("http://127.0.0.1:8080/api/plugin-host")
+        );
+        assert_eq!(env["POM_HOST_API_TOKEN"].as_deref(), Some("host-secret-token"));
+        assert!(!context.public_json().to_string().contains("host-secret-token"));
+        let bare: std::collections::HashMap<_, _> =
+            bridge_env(&Context::default()).into_iter().collect();
+        assert_eq!(bare["POM_HOST_API_TOKEN"], None, "removed, not inherited");
     }
 
     #[test]

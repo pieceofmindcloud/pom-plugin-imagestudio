@@ -22,10 +22,23 @@ pub struct HostApi {
     pub token: String,
 }
 
+/// See [`Context::launch_identity`].
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct LaunchIdentity {
+    gateway: Option<Gateway>,
+    model_dirs: Vec<PathBuf>,
+    host_api: Option<HostApi>,
+    cpu_only: bool,
+    low_vram: bool,
+}
+
 #[derive(Clone, Default)]
 pub struct Context {
     pub gateway: Option<Gateway>,
     pub workspace_root: Option<PathBuf>,
+    /// The node's whole-model folders, where its catalog reads model files
+    /// and where ComfyUI downloads them. Empty from an older node.
+    pub model_dirs: Vec<PathBuf>,
     pub host_api: Option<HostApi>,
     /// `{"features": {<key>: bool}, "storage_directory": <abs path>|null}`.
     pub preferences: Value,
@@ -40,6 +53,7 @@ impl std::fmt::Debug for Context {
                 &self.gateway.as_ref().map(|g| &g.openai_base_url),
             )
             .field("workspace_root", &self.workspace_root)
+            .field("model_dirs", &self.model_dirs)
             .field("host_api", &self.host_api.as_ref().map(|h| &h.base_url))
             .field("preferences", &self.preferences)
             .finish()
@@ -71,6 +85,17 @@ impl Context {
             Some(Value::String(_)) => return Err("workspace_root must be an absolute path".into()),
             Some(_) => return Err("workspace_root must be a string or null".into()),
         };
+        let model_dirs = match request.get("model_dirs") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(dirs)) => dirs
+                .iter()
+                .map(|dir| match dir.as_str() {
+                    Some(dir) if Path::new(dir).is_absolute() => Ok(PathBuf::from(dir)),
+                    _ => Err("model_dirs must hold absolute paths".to_owned()),
+                })
+                .collect::<Result<_, _>>()?,
+            Some(_) => return Err("model_dirs must be an array".into()),
+        };
         // Only a loopback node API is trusted: the token must never leave the machine.
         let host_api = match (
             request["host_api"]["base_url"].as_str(),
@@ -90,6 +115,7 @@ impl Context {
         Ok(Self {
             gateway,
             workspace_root,
+            model_dirs,
             host_api,
             preferences,
         })
@@ -100,14 +126,17 @@ impl Context {
         self.preferences["features"][key].as_bool().unwrap_or(false)
     }
 
-    /// What the running ComfyUI was started with: the gateway it calls and
-    /// the preferences that pick its flags. A change restarts it.
-    pub fn launch_identity(&self) -> (Option<Gateway>, bool, bool) {
-        (
-            self.gateway.clone(),
-            self.feature("cpu_only"),
-            self.feature("low_vram"),
-        )
+    /// What the running ComfyUI was started with: the gateway it calls, the
+    /// node's model folders and API, and the preferences that pick its flags.
+    /// A change restarts it.
+    pub fn launch_identity(&self) -> LaunchIdentity {
+        LaunchIdentity {
+            gateway: self.gateway.clone(),
+            model_dirs: self.model_dirs.clone(),
+            host_api: self.host_api.clone(),
+            cpu_only: self.feature("cpu_only"),
+            low_vram: self.feature("low_vram"),
+        }
     }
 
     /// Where this plugin keeps dynamic data inside the shared workspace: a
@@ -153,6 +182,24 @@ mod tests {
         );
         assert!(context.host_api.is_some());
         assert!(context.feature("example_feature_enabled"));
+    }
+
+    #[test]
+    fn model_dirs_are_read_and_must_be_absolute() {
+        let context = Context::from_configure(&json!({
+            "model_dirs": ["/models/full", "/mnt/disk2/models"]
+        }))
+        .unwrap();
+        assert_eq!(
+            context.model_dirs,
+            [PathBuf::from("/models/full"), PathBuf::from("/mnt/disk2/models")]
+        );
+        assert!(Context::from_configure(&json!({})).unwrap().model_dirs.is_empty());
+        assert!(Context::from_configure(&json!({"model_dirs": ["models"]})).is_err());
+        assert!(Context::from_configure(&json!({"model_dirs": "/models"})).is_err());
+        let a = Context::from_configure(&json!({"model_dirs": ["/a"]})).unwrap();
+        let b = Context::from_configure(&json!({"model_dirs": ["/b"]})).unwrap();
+        assert!(a.launch_identity() != b.launch_identity());
     }
 
     #[test]
