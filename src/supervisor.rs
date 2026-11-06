@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::{
     fs,
     io::{BufRead, BufReader},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
@@ -102,6 +102,9 @@ pub struct Supervisor {
     installer: Mutex<Option<Child>>,
     context: Mutex<Context>,
     busy: Mutex<bool>,
+    /// The image model components this node serves (`components.rs`), kept
+    /// beside ComfyUI's home, which the context sets.
+    served: Mutex<Option<Arc<crate::components::Served>>>,
 }
 impl Supervisor {
     pub fn new() -> Arc<Self> {
@@ -111,7 +114,34 @@ impl Supervisor {
             installer: Mutex::new(None),
             context: Mutex::new(Context::default()),
             busy: Mutex::new(false),
+            served: Mutex::new(None),
         })
+    }
+    /// ComfyUI's base directory: the workspace's state folder, else the
+    /// plugin directory's `data`.
+    fn home_of(context: &Context, base: &Path) -> PathBuf {
+        context
+            .workspace_state_dir()
+            .unwrap_or_else(|| base.join("data"))
+    }
+    /// The served components, for this context's home.
+    pub fn served(&self) -> Result<Arc<crate::components::Served>, String> {
+        let mut served = self.served.lock().unwrap();
+        if let Some(served) = served.as_ref() {
+            return Ok(Arc::clone(served));
+        }
+        let base = plugin_directory()?;
+        let home = Self::home_of(&self.context.lock().unwrap(), &base);
+        let created = Arc::new(crate::components::Served::new(&base, &home));
+        created.publish();
+        *served = Some(Arc::clone(&created));
+        Ok(created)
+    }
+    /// Whether ComfyUI was installed on this machine (the screen's opt-in).
+    pub fn installed(&self) -> bool {
+        plugin_directory()
+            .map(|base| base.join(".installed").exists())
+            .unwrap_or(false)
     }
     pub fn status(&self) -> Status {
         self.status.lock().unwrap().clone()
@@ -132,6 +162,9 @@ impl Supervisor {
             *current = context;
             changed
         };
+        // ComfyUI's home may have moved with the context.
+        *self.served.lock().unwrap() = None;
+        let _ = self.served();
         // The plugin is on demand: the host runs only while the screen is
         // open, so an installed ComfyUI starts right away. A fresh install
         // waits for the screen's `rpc.install`: opening it is the opt-in.
@@ -181,9 +214,7 @@ impl Supervisor {
         let context = self.context.lock().unwrap().clone();
         // Models, custom nodes, inputs, outputs and workflows belong to the
         // operator: they live in the workspace, not next to the runtime.
-        let home = context
-            .workspace_state_dir()
-            .unwrap_or_else(|| base.join("data"));
+        let home = Self::home_of(&context, &base);
         fs::create_dir_all(home.join("custom_nodes"))
             .map_err(|_| "Cannot create ComfyUI data directory")?;
         let backend = if context.feature("cpu_only") {

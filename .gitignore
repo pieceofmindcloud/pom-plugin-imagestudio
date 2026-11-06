@@ -4,3 +4,4 @@
 /ui/dist
 .DS_Store
 __pycache__/
+comfyui/

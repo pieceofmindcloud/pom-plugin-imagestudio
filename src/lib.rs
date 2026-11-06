@@ -7,6 +7,7 @@
 //! the install and the ComfyUI server belong to `supervisor.rs`'s threads.
 
 mod abi;
+mod components;
 mod context;
 mod installer;
 mod supervisor;
@@ -65,11 +66,48 @@ impl Plugin {
             "host.event" => Ok(json!({"status": "ok"})),
             "host.services" => {
                 let status = self.supervisor.status();
-                Ok(json!({"services": [{
+                let mut services = vec![json!({
                     "id": "comfyui", "kind": "app", "name": "ComfyUI",
                     "status": status.phase, "version": installer::VERSION,
                     "detail": status.detail,
-                }]}))
+                })];
+                // The image service tells POM's deploy screen this machine
+                // runs ComfyUI, and lists what it serves to the network.
+                if let Ok(served) = self.supervisor.served() {
+                    let phase = if self.supervisor.installed() {
+                        status.phase.as_str()
+                    } else {
+                        "waiting"
+                    };
+                    services.push(served.service(phase, ""));
+                }
+                Ok(json!({ "services": services }))
+            }
+            "component.serve" => {
+                let served = self.supervisor.served()?;
+                match served.serve(request, self.supervisor.installed()) {
+                    Ok(()) => {
+                        // Answer within the query budget; ComfyUI starts behind.
+                        self.supervisor.launch(false);
+                        Ok(json!({"status": "accepted"}))
+                    }
+                    Err(error) => Ok(json!({"status": "refused", "error": error})),
+                }
+            }
+            "component.release" => {
+                let deploy_id = request["deploy_id"]
+                    .as_str()
+                    .ok_or("deploy_id is missing")?;
+                self.supervisor.served()?.release(deploy_id);
+                Ok(json!({"status": "accepted"}))
+            }
+            "component.upstream" => {
+                let deploy_id = request["deploy_id"].as_str().unwrap_or_default();
+                let component = request["component"].as_str().unwrap_or_default();
+                if !self.supervisor.served()?.serves(deploy_id, component) {
+                    return Err(format!("{component} of {deploy_id} is not served here"));
+                }
+                Ok(self.supervisor.status().upstream())
             }
             "ui.manifest" => ui_manifest(),
             "ui.asset" => {
