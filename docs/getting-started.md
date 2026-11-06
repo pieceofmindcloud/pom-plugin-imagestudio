@@ -24,7 +24,7 @@ Connect their text output to a text input, such as the prompt of **CLIP Text Enc
 
 ## Models served on the POM network
 
-An admin can deploy an image model on the network by component: the diffusion model, the text encoder and the VAE each on a machine that already holds that file and runs ComfyUI (POM's **Deploy** screen, **Image model**, or **Deploy on POM** in ComfyUI's menu on an admin node). Those machines' ComfyUI then serve their part; nobody has to keep their screen open, and a machine that restarts serves its part again by itself. Closing ComfyUI with its X on a serving machine stops what it serves there until it reopens.
+An admin can deploy an image model on the network by component: the diffusion model, the text encoder and the VAE each on a machine that already holds that file and runs ComfyUI (POM's **Deploy** screen, **Image model**, or **Deploy on POM** in ComfyUI's menu on an admin node). Those machines' ComfyUI then serve their part; nobody has to keep their screen open, and a machine that restarts serves its part again by itself. Closing ComfyUI with its X on a serving machine stops what it serves there until it reopens. A serving machine gives its GPU back to POM's language models a minute after the last call; the next generation takes a few seconds more to load the part again.
 
 On an admin node, ComfyUI's menu has **POM ▸ Deploy on POM**: it lists, per part, only the files of that kind on machines that run ComfyUI, deploys under the name you give, and shows the image models already served with an **Undeploy** button. The node checks the choices and its role again on every call, so the command does nothing on a node that is not an admin.
 

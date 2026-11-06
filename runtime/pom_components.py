@@ -99,6 +99,58 @@ def _lock_for(key):
     return _gpu_lock
 
 
+# A serving machine shares its GPU with POM's language models (Strata,
+# llama.cpp): ComfyUI keeps a loaded model in VRAM after an op, so after a
+# minute without calls the models go back to RAM. The next op reloads them
+# from RAM in seconds.
+IDLE_UNLOAD_SECONDS = 60
+
+
+class IdleUnload:
+    """When the GPU was used for the network and then left idle."""
+
+    def __init__(self, seconds=IDLE_UNLOAD_SECONDS):
+        self.seconds = seconds
+        self.last = None
+        self.lock = threading.Lock()
+
+    def note_op(self, now):
+        with self.lock:
+            self.last = now
+
+    def check(self, now, unload):
+        """Run `unload` once when an op happened and none since `seconds`."""
+        with self.lock:
+            if self.last is None or now - self.last < self.seconds:
+                return False
+            self.last = None
+        unload()
+        return True
+
+
+_idle = IdleUnload()
+
+
+def _unload_gpu():
+    import comfy.model_management as mm
+
+    with _gpu_lock:
+        mm.unload_all_models()
+        mm.soft_empty_cache()
+    print("[POM] network models moved off the GPU after a minute idle")
+
+
+def _watch_idle():
+    import time
+
+    while True:
+        time.sleep(10)
+        try:
+            _idle.check(time.monotonic(), _unload_gpu)
+        except Exception as error:
+            print(f"[POM] could not free the GPU: {error}")
+
+
 def evict_unserved(entries):
     """Drop the loaded models no served entry uses any more, so a released
     component frees its RAM and VRAM without restarting ComfyUI."""
@@ -276,6 +328,7 @@ def register(home):
     from server import PromptServer
 
     served = ServedList(home)
+    threading.Thread(target=_watch_idle, name="pom-idle-unload", daemon=True).start()
     routes = PromptServer.instance.routes
 
     @routes.post("/pom/component/{deploy_id}/{component}/{op}")
@@ -289,8 +342,13 @@ def register(home):
         body = await request.read()
 
         def work():
-            with _lock_for((deploy_id, name)):
-                return run_op(entry, name, op, body)
+            import time
+
+            try:
+                with _lock_for((deploy_id, name)):
+                    return run_op(entry, name, op, body)
+            finally:
+                _idle.note_op(time.monotonic())
 
         try:
             answer = await asyncio.get_running_loop().run_in_executor(None, work)

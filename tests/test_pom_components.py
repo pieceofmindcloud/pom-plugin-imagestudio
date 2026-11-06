@@ -94,6 +94,18 @@ class Served(unittest.TestCase):
         self.served.get("img-1", "vae")
         self.assertEqual(sorted(cache.values()), ["kept", "kept too"])
 
+    def test_an_idle_machine_gives_the_gpu_back(self):
+        unloads = []
+        idle = pom_components.IdleUnload(seconds=60)
+        self.assertFalse(idle.check(100.0, lambda: unloads.append("x")), "nothing served yet")
+        idle.note_op(100.0)
+        self.assertFalse(idle.check(150.0, lambda: unloads.append("x")), "still in use")
+        self.assertTrue(idle.check(161.0, lambda: unloads.append("x")))
+        self.assertFalse(idle.check(500.0, lambda: unloads.append("x")), "once per use")
+        idle.note_op(600.0)
+        self.assertTrue(idle.check(700.0, lambda: unloads.append("x")))
+        self.assertEqual(unloads, ["x", "x"])
+
     def test_every_op_on_this_machine_runs_one_at_a_time(self):
         self.assertIs(pom_components._lock_for(("img-1", "vae")), pom_components._lock_for(("img-2", "diffusion")))
 
