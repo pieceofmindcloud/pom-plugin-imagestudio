@@ -86,6 +86,116 @@ def _current_job():
         return None
 
 
+# --- Generations: one POM request each, with the image budget -----------------
+
+_jobs = {}
+_jobs_lock = threading.Lock()
+_pending_prompt = threading.local()
+
+
+def forget_jobs():
+    with _jobs_lock:
+        _jobs.clear()
+
+
+def _post_json(path, payload):
+    base, token = _host_api()
+    request = urllib.request.Request(base + path, data=json.dumps(payload).encode(), method="POST")
+    request.add_header("x-pom-plugin-host-token", token)
+    request.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read() or b"{}")
+
+
+def _begin_job(job, target):
+    """Open the generation on the node before its first network call; a
+    spent image budget stops it here, before any GPU work."""
+    with _jobs_lock:
+        if job in _jobs:
+            return
+        _jobs[job] = {"images": 0, "width": None, "height": None, "steps": 0}
+    payload = {
+        "job_id": str(job),
+        "prompt": getattr(_pending_prompt, "text", "") or "",
+        "model": target.get("name", ""),
+        "details": {"images": 1},
+    }
+    try:
+        _post_json("/image-job/begin", payload)
+    except urllib.error.HTTPError as error:
+        detail = error.read()[:500].decode(errors="replace")
+        try:
+            detail = json.loads(detail).get("error", detail)
+        except ValueError:
+            pass
+        with _jobs_lock:
+            _jobs.pop(job, None)
+        if error.code == 429:
+            raise RuntimeError(f"Image budget spent on this machine: {detail}") from None
+        print(f"[POM] could not record this generation: {detail}")
+    except Exception as error:
+        print(f"[POM] could not record this generation: {error}")
+
+
+def note_images(job, count, width=None, height=None):
+    with _jobs_lock:
+        state = _jobs.get(job)
+        if state is not None:
+            state["images"] += int(count)
+            state["width"] = width or state["width"]
+            state["height"] = height or state["height"]
+
+
+def note_step(job, width=None, height=None):
+    with _jobs_lock:
+        state = _jobs.get(job)
+        if state is not None:
+            state["steps"] += 1
+            state["width"] = width or state["width"]
+            state["height"] = height or state["height"]
+
+
+_ENDS = {"execution_success": "ok", "execution_error": "error", "execution_interrupted": "interrupted"}
+
+
+def _on_event(event, data):
+    """ComfyUI told the browser an execution ended: close its generation."""
+    status = _ENDS.get(event)
+    if status is None or not isinstance(data, dict):
+        return
+    job = data.get("prompt_id")
+    with _jobs_lock:
+        state = _jobs.pop(job, None)
+    if state is None:
+        return
+    payload = {"job_id": str(job), "status": status, "images": state["images"],
+               "width": state["width"], "height": state["height"], "steps": state["steps"] or None}
+    if status == "error":
+        payload["error"] = str(data.get("exception_message") or data.get("exception_type") or "error")[:500]
+    try:
+        _post_json("/image-job/complete", payload)
+    except Exception as error:
+        print(f"[POM] could not close this generation: {error}")
+
+
+def _watch_executions():
+    try:
+        from server import PromptServer
+    except Exception:
+        return
+    instance = PromptServer.instance
+    original = instance.send_sync
+
+    def send_sync(event, data, sid=None):
+        try:
+            _on_event(event, data)
+        except Exception as error:  # never break ComfyUI's own events
+            print(f"[POM] generation report failed: {error}")
+        return original(event, data, sid)
+
+    instance.send_sync = send_sync
+
+
 def call(target, op, body):
     """Run `op` on the machine serving `target`; the answer's body, or a
     RuntimeError naming the component and the machine."""
@@ -93,11 +203,13 @@ def call(target, op, body):
     where = f"{target.get('component')} on {target.get('hostname')}"
     if not base or not token:
         raise RuntimeError(f"{where}: this ComfyUI is not connected to its POM node")
+    job = _current_job()
+    if job:
+        _begin_job(job, target)
     url = f"{base}/component/{target.get('deploy_id')}/{target.get('component')}/{op}"
     request = urllib.request.Request(url, data=body, method="POST")
     request.add_header("x-pom-plugin-host-token", token)
     request.add_header("Content-Type", "application/octet-stream")
-    job = _current_job()
     if job:
         request.add_header("x-pom-job", str(job))
     try:
@@ -196,6 +308,9 @@ def remote_model(target, weight_dtype):
         except TypeError:
             raise RuntimeError("this model's conditioning cannot cross the network yet") from None
         out, _, _ = wire.unpack(call(target, "apply", body))
+        job = _current_job()
+        if job:
+            note_step(job, width=int(x.shape[-1]) * 8, height=int(x.shape[-2]) * 8)
         return out["out"].to(x.device)
 
     model.apply_model = apply_model
@@ -221,6 +336,7 @@ class RemoteCLIP:
 
     def _encode(self, tokens):
         wire = _wire()
+        _pending_prompt.text = tokens.get("pom_text", "")
         body = wire.pack({}, {"text": tokens.get("pom_text", ""), "clip_type": self.clip_type})
         tensors, args, _ = wire.unpack(call(self.target, "encode", body))
         out = []
@@ -271,7 +387,12 @@ class RemoteVAE:
     def decode(self, samples_in, vae_options={}):
         wire = _wire()
         images, _, _ = wire.unpack(call(self.target, "decode", wire.pack({"samples": samples_in}, {})))
-        return images["images"]
+        out = images["images"]
+        job = _current_job()
+        if job and out.ndim >= 3:
+            count = out.shape[0] if out.ndim == 4 else 1
+            note_images(job, count, width=int(out.shape[-2]), height=int(out.shape[-3]))
+        return out
 
     def encode(self, pixel_samples):
         wire = _wire()
@@ -359,3 +480,4 @@ def install():
         return add_patches(self, patches, *args, **kwargs)
 
     comfy.model_patcher.ModelPatcher.add_patches = guarded
+    _watch_executions()

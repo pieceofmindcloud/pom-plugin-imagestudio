@@ -55,7 +55,27 @@ def _stubs():
 
 
 for _name, _module in _stubs().items():
-    sys.modules[_name] = _module
+    if _name == "folder_paths":
+        sys.modules[_name] = _module
+    else:
+        sys.modules[_name] = _module
+
+
+class _PromptServer:
+    """ComfyUI's server as the client sees it: the running prompt and the
+    events it sends to the browser."""
+
+    def __init__(self):
+        self.last_prompt_id = None
+        self.sent = []
+
+    def send_sync(self, event, data, sid=None):
+        self.sent.append((event, data))
+
+
+_server = sys.modules.get("server") or types.ModuleType("server")
+_server.PromptServer = types.SimpleNamespace(instance=_PromptServer())
+sys.modules["server"] = _server
 _spec = importlib.util.spec_from_file_location("pom_remote", ROOT / "runtime" / "pom_remote.py")
 pom_remote = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(pom_remote)
@@ -74,6 +94,7 @@ class _Node:
 
     def __init__(self):
         self.status, self.body, self.calls = 200, b"", []
+        self.jobs, self.refuse_begin = [], False
         owner = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -92,7 +113,16 @@ class _Node:
 
             def do_POST(self):
                 length = int(self.headers.get("Content-Length") or 0)
-                owner.calls.append((self.path, self.headers.get("x-pom-plugin-host-token"), self.rfile.read(length)))
+                body = self.rfile.read(length)
+                if self.path.endswith("/image-job/begin") or self.path.endswith("/image-job/complete"):
+                    owner.jobs.append((self.path.rsplit("/", 1)[1], json.loads(body)))
+                    if self.path.endswith("/begin") and owner.refuse_begin:
+                        self._answer(429, json.dumps({"error": "Image budget exhausted"}).encode())
+                    else:
+                        self._answer(200, b"{}")
+                    return
+                owner.calls.append((self.path, self.headers.get("x-pom-plugin-host-token"), body,
+                                    self.headers.get("x-pom-job")))
                 self._answer(owner.status, owner.body, "application/octet-stream")
 
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -110,7 +140,11 @@ class Remote(unittest.TestCase):
 
     def setUp(self):
         pom_remote.forget_components()
+        pom_remote.forget_jobs()
         self.node.status, self.node.body, self.node.calls[:] = 200, b"", []
+        self.node.jobs[:], self.node.refuse_begin = [], False
+        self.server = sys.modules["server"].PromptServer.instance
+        self.server.last_prompt_id = None
 
     def test_network_components_are_listed_after_local_files(self):
         import folder_paths
@@ -138,7 +172,7 @@ class Remote(unittest.TestCase):
         message = str(raised.exception)
         self.assertIn("vae on gpu-c", message)
         self.assertIn("did not answer", message)
-        path, token, _ = self.node.calls[-1]
+        path, token, _, _ = self.node.calls[-1]
         self.assertEqual(path, "/api/plugin-host/component/img-1/vae/decode")
         self.assertEqual(token, "host-token")
 
@@ -159,6 +193,52 @@ class Remote(unittest.TestCase):
         with self.assertRaises(RuntimeError) as raised:
             clip.tokenize("a cat", images=[object()])
         self.assertIn("text only", str(raised.exception))
+
+
+class Generations(Remote):
+    def target(self):
+        return pom_remote.target_of("POM ▸ Z-Image ▸ ae.safetensors", "vae")
+
+    def test_a_generation_begins_once_and_completes_with_its_images(self):
+        self.server.last_prompt_id = "p1"
+        pom_remote.call(self.target(), "decode", b"x")
+        pom_remote.call(self.target(), "decode", b"x")
+        pom_remote.note_images("p1", 2)
+        self.server.send_sync("execution_success", {"prompt_id": "p1"})
+        kinds = [kind for kind, _ in self.node.jobs]
+        self.assertEqual(kinds, ["begin", "complete"])
+        begin, complete = self.node.jobs[0][1], self.node.jobs[1][1]
+        self.assertEqual(begin["job_id"], "p1")
+        self.assertEqual(begin["model"], "Z-Image")
+        self.assertEqual(complete["status"], "ok")
+        self.assertEqual(complete["images"], 2)
+        self.assertEqual(self.server.sent[-1][0], "execution_success", "the browser still gets it")
+
+    def test_a_spent_budget_stops_before_the_first_call(self):
+        self.server.last_prompt_id = "p2"
+        self.node.refuse_begin = True
+        with self.assertRaises(RuntimeError) as raised:
+            pom_remote.call(self.target(), "decode", b"x")
+        self.assertIn("Image budget", str(raised.exception))
+        self.assertEqual(self.node.calls, [], "no GPU call went out")
+
+    def test_every_call_carries_the_job(self):
+        self.server.last_prompt_id = "p3"
+        pom_remote.call(self.target(), "decode", b"x")
+        self.assertEqual(self.node.calls[-1][3], "p3")
+
+    def test_an_error_completes_the_job_with_its_message(self):
+        self.server.last_prompt_id = "p4"
+        pom_remote.call(self.target(), "decode", b"x")
+        self.server.send_sync("execution_error", {"prompt_id": "p4", "exception_message": "out of memory"})
+        complete = self.node.jobs[-1][1]
+        self.assertEqual(complete["status"], "error")
+        self.assertIn("out of memory", complete["error"])
+
+    def test_a_generation_without_network_models_reports_nothing(self):
+        self.server.last_prompt_id = "p5"
+        self.server.send_sync("execution_success", {"prompt_id": "p5"})
+        self.assertEqual(self.node.jobs, [])
 
 
 if __name__ == "__main__":
