@@ -123,10 +123,6 @@ impl Served {
             .any(|item| item["deploy_id"] == deploy_id && item["component"] == component)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.items.lock().unwrap().is_empty()
-    }
-
     /// The `image` service for `host.services`: file names, never paths.
     pub fn service(&self, phase: &str, detail: &str) -> Value {
         let status = match phase {
