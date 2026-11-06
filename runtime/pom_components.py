@@ -78,6 +78,7 @@ class ServedList:
                 except (OSError, ValueError):
                     self.entries = []
                 self.mtime = mtime
+                evict_unserved(self.entries)
             for entry in self.entries:
                 if entry.get("deploy_id") == deploy_id and entry.get("component") == component:
                     return entry
@@ -87,13 +88,29 @@ class ServedList:
 # --- Running the ops (ComfyUI side) -------------------------------------------
 
 _cache = {}
-_locks = {}
 _cache_lock = threading.Lock()
+# ComfyUI's model management (`load_models_gpu`, the loaded-model list) is not
+# thread-safe: every op this machine serves runs one at a time, whatever the
+# deployment or component.
+_gpu_lock = threading.Lock()
 
 
 def _lock_for(key):
+    return _gpu_lock
+
+
+def evict_unserved(entries):
+    """Drop the loaded models no served entry uses any more, so a released
+    component frees its RAM and VRAM without restarting ComfyUI."""
+    served = set()
+    for entry in entries if isinstance(entries, list) else []:
+        for path in entry.get("paths") or []:
+            served.add(path)
     with _cache_lock:
-        return _locks.setdefault(key, threading.Lock())
+        for key in list(_cache):
+            paths = key[1] if isinstance(key[1], tuple) else (key[1],)
+            if not any(path in served for path in paths):
+                del _cache[key]
 
 
 def _json_safe(value):

@@ -49,9 +49,27 @@ def _stubs():
             self.patches.update(patches)
             return list(patches)
 
+        def add_hook_patches(self, hook, patches, strength_patch=1.0, strength_model=1.0):
+            self.patches.update(patches)
+
     model_patcher.ModelPatcher = ModelPatcher
     comfy.model_patcher = model_patcher
-    return {"folder_paths": folder_paths, "nodes": nodes, "comfy": comfy, "comfy.model_patcher": model_patcher}
+
+    execution = types.ModuleType("execution")
+
+    class PromptExecutor:
+        """ComfyUI's executor: `add_message` records every status event,
+        and sends it to a browser only when one queued the prompt."""
+
+        def __init__(self):
+            self.status_messages = []
+
+        def add_message(self, event, data, broadcast):
+            self.status_messages.append((event, data))
+
+    execution.PromptExecutor = PromptExecutor
+    return {"folder_paths": folder_paths, "nodes": nodes, "comfy": comfy, "comfy.model_patcher": model_patcher,
+            "execution": execution}
 
 
 for _name, _module in _stubs().items():
@@ -94,7 +112,7 @@ class _Node:
 
     def __init__(self):
         self.status, self.body, self.calls = 200, b"", []
-        self.jobs, self.refuse_begin = [], False
+        self.jobs, self.refuse_begin, self.drop = [], False, False
         owner = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -123,6 +141,15 @@ class _Node:
                     return
                 owner.calls.append((self.path, self.headers.get("x-pom-plugin-host-token"), body,
                                     self.headers.get("x-pom-job")))
+                if owner.drop:
+                    # The machine goes away halfway through its answer.
+                    self.send_response(200)
+                    self.send_header("Content-Length", "1000")
+                    self.end_headers()
+                    self.wfile.write(b"abc")
+                    self.wfile.flush()
+                    self.connection.shutdown(2)
+                    return
                 self._answer(owner.status, owner.body, "application/octet-stream")
 
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -142,7 +169,7 @@ class Remote(unittest.TestCase):
         pom_remote.forget_components()
         pom_remote.forget_jobs()
         self.node.status, self.node.body, self.node.calls[:] = 200, b"", []
-        self.node.jobs[:], self.node.refuse_begin = [], False
+        self.node.jobs[:], self.node.refuse_begin, self.node.drop = [], False, False
         self.server = sys.modules["server"].PromptServer.instance
         self.server.last_prompt_id = None
 
@@ -186,6 +213,33 @@ class Remote(unittest.TestCase):
         local = comfy.model_patcher.ModelPatcher(types.SimpleNamespace())
         self.assertEqual(local.add_patches({"w": 1}), ["w"])
         self.assertEqual(comfy.model_patcher.ModelPatcher(remote).add_patches({}), [])
+
+    def test_a_dropped_answer_names_the_machine(self):
+        self.node.drop = True
+        target = pom_remote.target_of("POM ▸ Z-Image ▸ ae.safetensors", "vae")
+        with self.assertRaises(RuntimeError) as raised:
+            pom_remote.call(target, "decode", b"")
+        self.assertIn("vae on gpu-c", str(raised.exception))
+
+    def test_only_loading_waits_long(self):
+        self.assertGreater(pom_remote.timeout_of("load"), pom_remote.timeout_of("apply"))
+        self.assertLessEqual(pom_remote.timeout_of("apply"), 5 * 60)
+
+    def test_attention_and_block_patches_on_a_remote_model_are_refused(self):
+        for options in ({"patches": {"attn1_patch": [object()]}},
+                        {"patches_replace": {"attn1": {("input", 1): object()}}}):
+            with self.assertRaises(RuntimeError) as raised:
+                pom_remote.refuse_patches(options)
+            self.assertIn("not supported on a POM network model", str(raised.exception))
+        pom_remote.refuse_patches({"cond_or_uncond": [0, 1], "patches": {}, "patches_replace": {}})
+
+    def test_hook_patches_on_a_remote_model_are_refused(self):
+        import comfy.model_patcher
+
+        remote = types.SimpleNamespace(pom_remote=True)
+        with self.assertRaises(RuntimeError):
+            comfy.model_patcher.ModelPatcher(remote).add_hook_patches(object(), {"w": 1})
+        comfy.model_patcher.ModelPatcher(types.SimpleNamespace()).add_hook_patches(object(), {"w": 1})
 
     def test_images_on_a_remote_text_encoder_are_refused(self):
         clip = pom_remote.RemoteCLIP({"component": "text_encoder", "hostname": "gpu-b"}, "lumina2")
@@ -234,6 +288,17 @@ class Generations(Remote):
         complete = self.node.jobs[-1][1]
         self.assertEqual(complete["status"], "error")
         self.assertIn("out of memory", complete["error"])
+
+    def test_a_generation_queued_without_a_browser_is_closed_too(self):
+        import execution
+
+        self.server.last_prompt_id = "p6"
+        pom_remote.call(self.target(), "decode", b"x")
+        pom_remote.note_images("p6", 1)
+        # ComfyUI sends nothing to a browser here: no client queued it.
+        execution.PromptExecutor().add_message("execution_success", {"prompt_id": "p6"}, False)
+        self.assertEqual([kind for kind, _ in self.node.jobs], ["begin", "complete"])
+        self.assertEqual(self.node.jobs[-1][1]["images"], 1)
 
     def test_a_generation_without_network_models_reports_nothing(self):
         self.server.last_prompt_id = "p5"

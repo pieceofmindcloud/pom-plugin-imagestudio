@@ -17,6 +17,7 @@ to the serving machine. Bodies are safetensors (`components.pack`/`unpack`).
 import json
 import os
 import threading
+import http.client
 import time
 import urllib.error
 import urllib.request
@@ -26,7 +27,23 @@ SEPARATOR = " ▸ "
 # ComfyUI folder -> component listed in it.
 FOLDERS = {"diffusion_models": "diffusion", "text_encoders": "text_encoder", "vae": "vae"}
 LIST_TTL = 5.0
-CALL_TIMEOUT = 15 * 60
+# A cold `load` of a large model can take minutes; a step, an encoding or
+# a decode that has not answered in 5 minutes is a machine that went away.
+LOAD_TIMEOUT = 15 * 60
+OP_TIMEOUT = 5 * 60
+
+
+def timeout_of(op):
+    return LOAD_TIMEOUT if op == "load" else OP_TIMEOUT
+
+
+def refuse_patches(transformer_options):
+    """Attention and block patches (PAG, SAG, FreeU, IPAdapter-style) travel
+    in `transformer_options` and would be silently dropped on the way to the
+    serving machine: refuse them instead."""
+    options = transformer_options or {}
+    if any(options.get(key) for key in ("patches", "patches_replace")):
+        raise RuntimeError("Attention and block patches are not supported on a POM network model yet")
 
 _components = {"at": 0.0, "list": []}
 _components_lock = threading.Lock()
@@ -179,6 +196,25 @@ def _on_event(event, data):
 
 
 def _watch_executions():
+    # Every status event passes through the executor's `add_message`, also
+    # for a prompt no browser queued (an API client); ComfyUI then sends
+    # nothing to `send_sync`. Both are watched: closing a generation twice
+    # is a no-op.
+    try:
+        import execution
+
+        add_message = execution.PromptExecutor.add_message
+
+        def watched(self, event, data, *args, **kwargs):
+            try:
+                _on_event(event, data)
+            except Exception as error:  # never break ComfyUI's own events
+                print(f"[POM] generation report failed: {error}")
+            return add_message(self, event, data, *args, **kwargs)
+
+        execution.PromptExecutor.add_message = watched
+    except Exception as error:
+        print(f"[POM] generation reports limited to browser runs: {error}")
     try:
         from server import PromptServer
     except Exception:
@@ -213,7 +249,7 @@ def call(target, op, body):
     if job:
         request.add_header("x-pom-job", str(job))
     try:
-        with urllib.request.urlopen(request, timeout=CALL_TIMEOUT) as response:
+        with urllib.request.urlopen(request, timeout=timeout_of(op)) as response:
             return response.read()
     except urllib.error.HTTPError as error:
         detail = error.read()[:500].decode(errors="replace")
@@ -224,6 +260,9 @@ def call(target, op, body):
         raise RuntimeError(f"{where}: {detail}") from None
     except urllib.error.URLError as error:
         raise RuntimeError(f"{where}: {error.reason}") from None
+    except (OSError, http.client.HTTPException) as error:
+        # A timeout, or the connection cut halfway through the answer.
+        raise RuntimeError(f"{where}: {type(error).__name__}: {error or 'the machine stopped answering'}") from None
 
 
 # --- Stand-ins ------------------------------------------------------------------
@@ -291,6 +330,7 @@ def remote_model(target, weight_dtype):
     def apply_model(x, t, c_concat=None, c_crossattn=None, control=None, transformer_options={}, **kwargs):
         if control is not None:
             raise RuntimeError("ControlNet on a POM network model is not supported yet")
+        refuse_patches(transformer_options)
         tensors, lists, plain = {"x": x, "t": t}, {}, {}
         if c_concat is not None:
             tensors["c_concat"] = c_concat
@@ -480,4 +520,13 @@ def install():
         return add_patches(self, patches, *args, **kwargs)
 
     comfy.model_patcher.ModelPatcher.add_patches = guarded
+    add_hook_patches = getattr(comfy.model_patcher.ModelPatcher, "add_hook_patches", None)
+    if add_hook_patches is not None:
+
+        def guarded_hooks(self, hook, patches, *args, **kwargs):
+            if patches and getattr(self.model, "pom_remote", False):
+                raise RuntimeError("Hook LoRAs and model patches are not supported on a POM network model yet")
+            return add_hook_patches(self, hook, patches, *args, **kwargs)
+
+        comfy.model_patcher.ModelPatcher.add_hook_patches = guarded_hooks
     _watch_executions()

@@ -81,6 +81,22 @@ class Served(unittest.TestCase):
     def test_a_missing_file_serves_nothing(self):
         self.assertIsNone(self.served.get("img-1", "vae"))
 
+    def test_a_released_model_leaves_the_cache(self):
+        cache = pom_components._cache
+        cache.clear()
+        cache[("vae", "/m/ae.safetensors")] = "kept"
+        cache[("diffusion", "/m/old.safetensors", "{}")] = "released"
+        cache[("text_encoder", ("/m/qwen.safetensors",), "lumina2")] = "kept too"
+        self.write([
+            {"deploy_id": "img-1", "component": "vae", "paths": ["/m/ae.safetensors"], "options": {}},
+            {"deploy_id": "img-1", "component": "text_encoder", "paths": ["/m/qwen.safetensors"], "options": {}},
+        ])
+        self.served.get("img-1", "vae")
+        self.assertEqual(sorted(cache.values()), ["kept", "kept too"])
+
+    def test_every_op_on_this_machine_runs_one_at_a_time(self):
+        self.assertIs(pom_components._lock_for(("img-1", "vae")), pom_components._lock_for(("img-2", "diffusion")))
+
 
 if __name__ == "__main__":
     unittest.main()
