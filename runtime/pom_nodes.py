@@ -319,10 +319,57 @@ def plan_links(files, models_dir):
     return plan
 
 
-def sync_links_to(models_dir, plan):
-    """Make `<folder>/pom/` hold exactly the planned links. Only symbolic
-    links under `pom/` are created or removed; a regular file (the user's
-    own) is never touched."""
+ALIASES_FILE = ".pom-aliases.json"
+
+
+def plan_aliases(files, models_dir):
+    """`<models_dir>/<folder>/<file name>` -> the file: the plain name
+    ComfyUI's templates and shared workflows ask for (`ae.safetensors`, not
+    `pom/<org>/<repo>/ae.safetensors`). A name two catalog files share in one
+    folder gets no alias, since the template could mean either."""
+    seen = {}
+    for link, target in plan_links(files, models_dir).items():
+        folder = os.path.relpath(link, models_dir).split(os.sep)[0]
+        alias = os.path.join(models_dir, folder, os.path.basename(link))
+        seen.setdefault(alias, set()).add(target)
+    return {alias: next(iter(targets)) for alias, targets in seen.items() if len(targets) == 1}
+
+
+def _sync_aliases(models_dir, aliases):
+    """Plain-name aliases in the category folders, beside the user's own
+    files. Only aliases this plugin made (listed in `.pom-aliases.json`) are
+    ever replaced or removed; a name already taken is left alone."""
+    record = os.path.join(models_dir, ALIASES_FILE)
+    try:
+        with open(record) as handle:
+            owned = set(json.load(handle))
+    except (OSError, ValueError):
+        owned = set()
+    for alias in list(owned):
+        if alias not in aliases or (os.path.islink(alias) and os.readlink(alias) != aliases[alias]):
+            if os.path.islink(alias):
+                os.remove(alias)
+            owned.discard(alias)
+    for alias, target in aliases.items():
+        if os.path.lexists(alias):
+            continue
+        os.makedirs(os.path.dirname(alias), exist_ok=True)
+        try:
+            os.symlink(target, alias)
+        except OSError:
+            continue
+        owned.add(alias)
+    os.makedirs(models_dir, exist_ok=True)
+    with open(record, "w") as handle:
+        json.dump(sorted(owned), handle)
+
+
+def sync_links_to(models_dir, plan, aliases=None):
+    """Make `<folder>/pom/` hold exactly the planned links, and the plain-name
+    aliases exactly the planned ones. Only symbolic links under `pom/` and
+    the aliases this plugin made are created or removed; a regular file (the
+    user's own) is never touched."""
+    _sync_aliases(models_dir, aliases or {})
     for folder in set(CATEGORY_FOLDERS.values()):
         link_root = os.path.join(models_dir, folder, LINK_DIR)
         if not os.path.isdir(link_root):
@@ -380,8 +427,9 @@ def sync_links():
     answer = _host_api_get("/catalog/images")
     if answer is None:
         return 0
-    plan = plan_links(answer.get("image_files", []), folder_paths.models_dir)
-    sync_links_to(folder_paths.models_dir, plan)
+    files = answer.get("image_files", [])
+    plan = plan_links(files, folder_paths.models_dir)
+    sync_links_to(folder_paths.models_dir, plan, plan_aliases(files, folder_paths.models_dir))
     return len(plan)
 
 

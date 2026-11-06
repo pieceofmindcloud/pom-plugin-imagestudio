@@ -225,6 +225,36 @@ class Links(unittest.TestCase):
             del folder_paths.add_model_folder_path
         self.assertEqual(registered, [("vae", os.path.dirname(self.vae))])
 
+    def test_templates_find_the_file_by_its_plain_name(self):
+        files = [_file(self.vae, "vae", name="Comfy-Org/z/ae.safetensors")]
+        pom_nodes.sync_links_to(self.models, pom_nodes.plan_links(files, self.models),
+                                pom_nodes.plan_aliases(files, self.models))
+        alias = os.path.join(self.models, "vae", "ae.safetensors")
+        self.assertEqual(os.path.realpath(alias), os.path.realpath(self.vae))
+
+    def test_an_alias_never_replaces_a_users_file(self):
+        mine = os.path.join(self.models, "vae", "ae.safetensors")
+        os.makedirs(os.path.dirname(mine))
+        Path(mine).write_bytes(b"user")
+        files = [_file(self.vae, "vae", name="a/b/ae.safetensors")]
+        pom_nodes.sync_links_to(self.models, {}, pom_nodes.plan_aliases(files, self.models))
+        self.assertFalse(os.path.islink(mine))
+        self.assertEqual(Path(mine).read_bytes(), b"user")
+
+    def test_stale_aliases_are_removed_and_only_ours(self):
+        files = [_file(self.vae, "vae", name="a/b/ae.safetensors")]
+        pom_nodes.sync_links_to(self.models, {}, pom_nodes.plan_aliases(files, self.models))
+        other = os.path.join(self.models, "vae", "theirs.safetensors")
+        os.symlink(self.unet, other)
+        pom_nodes.sync_links_to(self.models, {}, {})
+        self.assertFalse(os.path.lexists(os.path.join(self.models, "vae", "ae.safetensors")))
+        self.assertTrue(os.path.islink(other), "a link POM did not make stays")
+
+    def test_two_files_with_one_name_get_no_alias(self):
+        files = [_file(self.vae, "vae", name="a/b/ae.safetensors"),
+                 _file(self.unet, "vae", name="c/d/ae.safetensors")]
+        self.assertEqual(pom_nodes.plan_aliases(files, self.models), {})
+
     def test_sync_is_idempotent(self):
         plan = pom_nodes.plan_links([_file(self.vae, "vae", name="a/b/ae.safetensors"),
                                      _file(self.unet, "diffusion", name="a/b/z.safetensors")],
