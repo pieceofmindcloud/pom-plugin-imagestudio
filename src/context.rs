@@ -192,9 +192,15 @@ mod tests {
         .unwrap();
         assert_eq!(
             context.model_dirs,
-            [PathBuf::from("/models/full"), PathBuf::from("/mnt/disk2/models")]
+            [
+                PathBuf::from("/models/full"),
+                PathBuf::from("/mnt/disk2/models")
+            ]
         );
-        assert!(Context::from_configure(&json!({})).unwrap().model_dirs.is_empty());
+        assert!(Context::from_configure(&json!({}))
+            .unwrap()
+            .model_dirs
+            .is_empty());
         assert!(Context::from_configure(&json!({"model_dirs": ["models"]})).is_err());
         assert!(Context::from_configure(&json!({"model_dirs": "/models"})).is_err());
         let a = Context::from_configure(&json!({"model_dirs": ["/a"]})).unwrap();

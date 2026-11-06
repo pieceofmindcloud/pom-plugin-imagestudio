@@ -397,9 +397,15 @@ pub fn bridge_env(context: &Context) -> Vec<(&'static str, Option<String>)> {
         .collect::<Vec<_>>()
         .join("\n");
     vec![
-        ("POM_OPENAI_BASE_URL", gateway.map(|g| g.openai_base_url.clone())),
+        (
+            "POM_OPENAI_BASE_URL",
+            gateway.map(|g| g.openai_base_url.clone()),
+        ),
         ("POM_API_KEY", gateway.map(|g| g.api_key.clone())),
-        ("POM_MODEL_DIRS", (!model_dirs.is_empty()).then_some(model_dirs)),
+        (
+            "POM_MODEL_DIRS",
+            (!model_dirs.is_empty()).then_some(model_dirs),
+        ),
         ("POM_HOST_API_URL", host_api.map(|h| h.base_url.clone())),
         ("POM_HOST_API_TOKEN", host_api.map(|h| h.token.clone())),
     ]
@@ -507,8 +513,14 @@ mod tests {
             env["POM_HOST_API_URL"].as_deref(),
             Some("http://127.0.0.1:8080/api/plugin-host")
         );
-        assert_eq!(env["POM_HOST_API_TOKEN"].as_deref(), Some("host-secret-token"));
-        assert!(!context.public_json().to_string().contains("host-secret-token"));
+        assert_eq!(
+            env["POM_HOST_API_TOKEN"].as_deref(),
+            Some("host-secret-token")
+        );
+        assert!(!context
+            .public_json()
+            .to_string()
+            .contains("host-secret-token"));
         let bare: std::collections::HashMap<_, _> =
             bridge_env(&Context::default()).into_iter().collect();
         assert_eq!(bare["POM_HOST_API_TOKEN"], None, "removed, not inherited");
