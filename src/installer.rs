@@ -44,17 +44,64 @@ fn uv_artifact() -> Result<Artifact, String> {
 }
 
 /// The PyTorch build for this machine, as `uv pip --torch-backend` names it.
-/// NVIDIA wins over AMD on a machine with both (CUDA is ComfyUI's main path);
-/// `cu128` is the first CUDA build with Blackwell (sm_120) kernels.
+/// NVIDIA wins over AMD on a machine with both (CUDA is ComfyUI's main path).
 pub fn torch_backend() -> &'static str {
     let exists = |path: &str| Path::new(path).exists();
     match std::env::consts::OS {
         "macos" => "auto",
-        "linux" if exists("/proc/driver/nvidia/version") || exists("/dev/nvidiactl") => "cu128",
+        "linux" if exists("/proc/driver/nvidia/version") || exists("/dev/nvidiactl") => {
+            cuda_backend(nvidia_driver().as_deref())
+        }
         "linux" if exists("/dev/kfd") => "rocm6.4",
-        "windows" if exists(r"C:\Windows\System32\nvidia-smi.exe") => "cu128",
+        "windows" if exists(r"C:\Windows\System32\nvidia-smi.exe") => {
+            cuda_backend(nvidia_driver().as_deref())
+        }
         _ => "cpu",
     }
+}
+
+/// ComfyUI needs a `cu130` PyTorch for its optimized CUDA kernels (comfy-kitchen:
+/// the int8/fp8/nvfp4 weights of current image models); CUDA 13.0 needs an
+/// NVIDIA driver from the 580 series. Older or unknown drivers get `cu128`,
+/// the first build with Blackwell (sm_120) kernels.
+fn cuda_backend(driver: Option<&str>) -> &'static str {
+    let major = driver
+        .and_then(|version| version.split('.').next())
+        .and_then(|major| major.parse::<u32>().ok());
+    match major {
+        Some(major) if major >= 580 => "cu130",
+        _ => "cu128",
+    }
+}
+
+/// The NVIDIA driver version (`580.178.04`): the kernel module's on Linux,
+/// `nvidia-smi`'s otherwise.
+fn nvidia_driver() -> Option<String> {
+    if let Ok(text) = fs::read_to_string("/proc/driver/nvidia/version") {
+        return driver_in(&text);
+    }
+    let output = Command::new("nvidia-smi")
+        .args(["--query-gpu=driver_version", "--format=csv,noheader"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    driver_in(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The first `NNN.NN[.NN]` token, as `/proc/driver/nvidia/version` and
+/// `nvidia-smi` print the driver version.
+fn driver_in(text: &str) -> Option<String> {
+    text.split_whitespace()
+        .find(|word| {
+            let parts: Vec<&str> = word.split('.').collect();
+            parts.len() >= 2
+                && parts
+                    .iter()
+                    .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+                && parts[0].len() == 3
+        })
+        .map(str::to_owned)
 }
 
 /// The stages of a fresh install, in order, as the screen reports them.
@@ -447,7 +494,19 @@ mod tests {
 
     #[test]
     fn torch_backend_is_one_uv_knows() {
-        assert!(["auto", "cu128", "rocm6.4", "cpu"].contains(&torch_backend()));
+        assert!(["auto", "cu130", "cu128", "rocm6.4", "cpu"].contains(&torch_backend()));
+    }
+
+    #[test]
+    fn the_driver_picks_the_cuda_build() {
+        let proc = "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  580.178.04  Release Build  (dvs-builder@U22)  Tue Jul  7 12:18:12 UTC 2026\nGCC version:  gcc version 13.3.0\n";
+        assert_eq!(driver_in(proc).as_deref(), Some("580.178.04"));
+        assert_eq!(driver_in("570.86.15\n").as_deref(), Some("570.86.15"));
+        assert_eq!(driver_in("no driver"), None);
+        assert_eq!(cuda_backend(Some("580.178.04")), "cu130");
+        assert_eq!(cuda_backend(Some("590.1")), "cu130");
+        assert_eq!(cuda_backend(Some("570.86.15")), "cu128");
+        assert_eq!(cuda_backend(None), "cu128");
     }
 }
 

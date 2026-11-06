@@ -8,7 +8,7 @@ The plugin picks the PyTorch build from the machine: CUDA 12.8 when an NVIDIA dr
 
 ## Your files
 
-Models, custom nodes, inputs, outputs and saved workflows live in the POM workspace under `.comfyui/` (`models/checkpoints`, `models/diffusion_models`, `models/text_encoders`, `models/vae`, `models/loras`, `input`, `output`, `user`). Put model files there, or install them from ComfyUI's own model library; an update of the plugin replaces only the runtime, never these folders.
+Models, custom nodes, inputs, outputs and saved workflows live in the POM workspace under `.comfyui/` (`models/checkpoints`, `models/diffusion_models`, `models/text_encoders`, `models/vae`, `models/loras`, `input`, `output`, `user`). Put model files there, or use the **Download** button ComfyUI shows for a workflow's missing models: the POM nodes take that button over, so the file downloads on the POM node into the right `models/` folder (Hugging Face and Civitai links), with the progress in the corner of the screen, instead of into your browser's downloads. An update of the plugin replaces only the runtime, never these folders.
 
 ## POM nodes
 

@@ -18,6 +18,7 @@ use std::{
 
 const BRIDGE: &str = include_str!("../runtime/bridge.py");
 const POM_NODES: &str = include_str!("../runtime/pom_nodes.py");
+const POM_NODES_WEB: &str = include_str!("../runtime/web/pom.js");
 
 struct Running {
     child: Child,
@@ -406,9 +407,10 @@ pub fn comfy_args(context: &Context) -> Vec<String> {
 /// rewriting it on every start keeps it the plugin's version.
 fn install_pom_nodes(home: &Path) -> Result<(), String> {
     let directory = home.join("custom_nodes/pom_nodes");
-    fs::create_dir_all(&directory).map_err(|_| "Cannot install the POM nodes")?;
-    fs::write(directory.join("__init__.py"), POM_NODES)
-        .map_err(|_| "Cannot install the POM nodes".to_owned())
+    let failed = |_| "Cannot install the POM nodes".to_owned();
+    fs::create_dir_all(directory.join("web")).map_err(failed)?;
+    fs::write(directory.join("__init__.py"), POM_NODES).map_err(failed)?;
+    fs::write(directory.join("web/pom.js"), POM_NODES_WEB).map_err(failed)
 }
 
 fn private_directory(path: &Path) -> Result<(), String> {
@@ -496,6 +498,8 @@ mod tests {
         install_pom_nodes(&home).unwrap();
         let text = fs::read_to_string(home.join("custom_nodes/pom_nodes/__init__.py")).unwrap();
         assert_eq!(text, POM_NODES);
+        let web = fs::read_to_string(home.join("custom_nodes/pom_nodes/web/pom.js")).unwrap();
+        assert_eq!(web, POM_NODES_WEB);
         assert!(!text.contains("sk-"), "no key in the node source");
         fs::remove_dir_all(home).unwrap();
     }
