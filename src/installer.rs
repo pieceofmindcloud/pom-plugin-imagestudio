@@ -524,12 +524,8 @@ mod live {
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::temp_dir().join("pom-comfyui-e2e"));
         let home = base.join("home");
-        fs::create_dir_all(home.join("custom_nodes/pom_nodes")).unwrap();
-        fs::write(
-            home.join("custom_nodes/pom_nodes/__init__.py"),
-            include_str!("../runtime/pom_nodes.py"),
-        )
-        .unwrap();
+        // The POM nodes as a start writes them (nodes, web, components, remote).
+        crate::supervisor::install_pom_nodes(&home).unwrap();
         let (python, source) = ensure(
             &base,
             torch_backend(),
@@ -554,19 +550,86 @@ mod live {
             "path": vae, "name": "a/b/ae.safetensors", "category": "vae", "metadata_error": null
         }]})
         .to_string();
+        // With a real VAE named, the fake node also lists it as a network
+        // component and forwards its ops to the bridge, as a POM node would.
+        let real_vae = std::env::var_os("POM_COMFYUI_E2E_VAE");
+        let components = if real_vae.is_some() {
+            serde_json::json!({"components": [{
+                "deploy_id": "img-e2e", "name": "E2E", "component": "vae",
+                "files": ["ae.safetensors"], "status": "ready",
+                "node_id": "self", "hostname": "this-machine", "plugin_code": "comfyui"
+            }]})
+        } else {
+            serde_json::json!({"components": []})
+        }
+        .to_string();
+        let upstream: std::sync::Arc<std::sync::Mutex<Option<(u64, String)>>> = Default::default();
+        let forward_to = std::sync::Arc::clone(&upstream);
         let node = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let node_port = node.local_addr().unwrap().port();
         std::thread::spawn(move || {
             for stream in node.incoming().flatten() {
-                let mut stream = stream;
-                let mut request = [0u8; 4096];
-                let _ = io::Read::read(&mut stream, &mut request);
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    catalog.len(),
-                    catalog
+                let (catalog, components, forward_to) = (
+                    catalog.clone(),
+                    components.clone(),
+                    std::sync::Arc::clone(&forward_to),
                 );
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut reader = io::BufReader::new(stream.try_clone().unwrap());
+                    let mut line = String::new();
+                    io::BufRead::read_line(&mut reader, &mut line).unwrap();
+                    let path = line.split_whitespace().nth(1).unwrap_or("").to_owned();
+                    let mut length = 0usize;
+                    loop {
+                        let mut header = String::new();
+                        io::BufRead::read_line(&mut reader, &mut header).unwrap();
+                        if header.trim().is_empty() {
+                            break;
+                        }
+                        if let Some(value) =
+                            header.to_ascii_lowercase().strip_prefix("content-length:")
+                        {
+                            length = value.trim().parse().unwrap_or(0);
+                        }
+                    }
+                    let mut body = vec![0u8; length];
+                    io::Read::read_exact(&mut reader, &mut body).unwrap();
+                    let (status, kind, answer) = if path.ends_with("/catalog/images") {
+                        (200, "application/json", catalog.into_bytes())
+                    } else if path.ends_with("/components") {
+                        (200, "application/json", components.into_bytes())
+                    } else if let Some(op) = path.strip_prefix("/api/plugin-host/component/") {
+                        let (port, token) = forward_to.lock().unwrap().clone().unwrap();
+                        let url = format!("http://127.0.0.1:{port}/pom/component/{op}");
+                        match ureq::post(&url)
+                            .set("x-pom-plugin-token", &token)
+                            .send_bytes(&body)
+                        {
+                            Ok(response) => {
+                                let mut bytes = Vec::new();
+                                io::Read::read_to_end(&mut response.into_reader(), &mut bytes)
+                                    .unwrap();
+                                (200, "application/octet-stream", bytes)
+                            }
+                            Err(error) => (
+                                502,
+                                "application/json",
+                                serde_json::json!({"error": error.to_string()})
+                                    .to_string()
+                                    .into_bytes(),
+                            ),
+                        }
+                    } else {
+                        (200, "application/json", b"{}".to_vec())
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        answer.len()
+                    );
+                    let _ = io::Write::write_all(&mut stream, &answer);
+                });
             }
         });
         let log = fs::File::create(base.join("e2e-bridge.log")).unwrap();
@@ -594,6 +657,7 @@ mod live {
             serde_json::from_str(&line).expect("ComfyUI did not start; see comfyui.log");
         let port = ready["port"].as_u64().unwrap();
         let token = ready["token"].as_str().unwrap();
+        *upstream.lock().unwrap() = Some((port, token.to_owned()));
         let agent = ureq::AgentBuilder::new()
             .timeout_read(Duration::from_secs(60))
             .build();
@@ -623,6 +687,107 @@ mod live {
             std::thread::sleep(Duration::from_secs(1));
         }
         assert!(listed.contains("pom/a/b/ae.safetensors"), "{listed}");
+        // A served VAE answers its ops through the bridge (the path POM's node
+        // uses), with the operator's real VAE when one is named.
+        if let Some(vae) = std::env::var_os("POM_COMFYUI_E2E_VAE") {
+            fs::write(
+                home.join("pom-served.json"),
+                serde_json::json!([{"deploy_id": "img-e2e", "component": "vae",
+                                    "paths": [vae.to_string_lossy()], "options": {}}])
+                .to_string(),
+            )
+            .unwrap();
+            let post = |op: &str, body: &[u8]| -> Result<Vec<u8>, String> {
+                let response = agent
+                    .post(&format!(
+                        "http://127.0.0.1:{port}/pom/component/img-e2e/vae/{op}"
+                    ))
+                    .set("x-pom-plugin-token", token)
+                    .send_bytes(body)
+                    .map_err(|error| match error {
+                        ureq::Error::Status(code, response) => {
+                            format!(
+                                "{op}: {code} {}",
+                                response.into_string().unwrap_or_default()
+                            )
+                        }
+                        other => other.to_string(),
+                    })?;
+                let mut bytes = Vec::new();
+                io::Read::read_to_end(&mut response.into_reader(), &mut bytes)
+                    .map_err(|error| error.to_string())?;
+                Ok(bytes)
+            };
+            let header = |body: &[u8]| -> serde_json::Value {
+                let len = u64::from_le_bytes(body[..8].try_into().unwrap()) as usize;
+                serde_json::from_slice(&body[8..8 + len]).unwrap()
+            };
+            let empty = br#"{"__metadata__":{"args":"{}","lists":"{}"}}"#;
+            let mut body = (empty.len() as u64).to_le_bytes().to_vec();
+            body.extend_from_slice(empty);
+            let loaded = header(&post("load", &body).unwrap());
+            let args: serde_json::Value =
+                serde_json::from_str(loaded["__metadata__"]["args"].as_str().unwrap()).unwrap();
+            let channels = args["latent_channels"].as_u64().unwrap() as usize;
+            let bytes = channels * 8 * 8 * 4;
+            let meta = format!(
+                r#"{{"samples":{{"dtype":"F32","shape":[1,{channels},8,8],"data_offsets":[0,{bytes}]}},"__metadata__":{{"args":"{{}}","lists":"{{}}"}}}}"#
+            );
+            let mut body = (meta.len() as u64).to_le_bytes().to_vec();
+            body.extend_from_slice(meta.as_bytes());
+            body.resize(body.len() + bytes, 0);
+            let decoded = header(&post("decode", &body).unwrap());
+            assert_eq!(
+                decoded["images"]["shape"],
+                serde_json::json!([1, 64, 64, 3]),
+                "{decoded}"
+            );
+            // ComfyUI's own VAE Decode on the network VAE, as a person would
+            // run it: the name is listed by Load VAE and the decode is remote.
+            let listed = get("/api/object_info/VAELoader").unwrap();
+            assert!(listed.contains("E2E"), "{listed}");
+            let workflow = serde_json::json!({"prompt": {
+                "1": {"class_type": "EmptySD3LatentImage", "inputs": {"width": 64, "height": 64, "batch_size": 1}},
+                "2": {"class_type": "VAELoader", "inputs": {"vae_name": "POM ▸ E2E ▸ ae.safetensors"}},
+                "3": {"class_type": "VAEDecode", "inputs": {"samples": ["1", 0], "vae": ["2", 0]}},
+                "4": {"class_type": "PreviewImage", "inputs": {"images": ["3", 0]}}
+            }});
+            let queued: serde_json::Value = match agent
+                .post(&format!("http://127.0.0.1:{port}/prompt"))
+                .set("x-pom-plugin-token", token)
+                .set("origin", "http://pom.example:8080")
+                .set("content-type", "application/json")
+                .send_string(&workflow.to_string())
+            {
+                Ok(response) => serde_json::from_str(&response.into_string().unwrap()).unwrap(),
+                Err(ureq::Error::Status(code, response)) => {
+                    panic!(
+                        "prompt refused {code}: {}",
+                        response.into_string().unwrap_or_default()
+                    )
+                }
+                Err(error) => panic!("{error}"),
+            };
+            let id = queued["prompt_id"].as_str().unwrap().to_owned();
+            let mut history = serde_json::Value::Null;
+            for _ in 0..120 {
+                history =
+                    serde_json::from_str(&get(&format!("/api/history/{id}")).unwrap()).unwrap();
+                if history[&id]["status"]["completed"] == true
+                    || history[&id]["status"]["status_str"] == "error"
+                {
+                    break;
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            assert_eq!(history[&id]["status"]["status_str"], "success", "{history}");
+            assert!(
+                history[&id]["outputs"]["4"]["images"]
+                    .as_array()
+                    .is_some_and(|images| !images.is_empty()),
+                "{history}"
+            );
+        }
         drop(bridge.stdin.take());
         assert!(bridge.wait().unwrap().success());
     }

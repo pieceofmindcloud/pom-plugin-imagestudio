@@ -19,6 +19,8 @@ use std::{
 const BRIDGE: &str = include_str!("../runtime/bridge.py");
 const POM_NODES: &str = include_str!("../runtime/pom_nodes.py");
 const POM_NODES_WEB: &str = include_str!("../runtime/web/pom.js");
+const POM_COMPONENTS: &str = include_str!("../runtime/pom_components.py");
+const POM_REMOTE: &str = include_str!("../runtime/pom_remote.py");
 
 struct Running {
     child: Child,
@@ -457,12 +459,14 @@ pub fn comfy_args(context: &Context) -> Vec<String> {
 
 /// The POM nodes are this plugin's own directory inside `custom_nodes`;
 /// rewriting it on every start keeps it the plugin's version.
-fn install_pom_nodes(home: &Path) -> Result<(), String> {
+pub(crate) fn install_pom_nodes(home: &Path) -> Result<(), String> {
     let directory = home.join("custom_nodes/pom_nodes");
     let failed = |_| "Cannot install the POM nodes".to_owned();
     fs::create_dir_all(directory.join("web")).map_err(failed)?;
     fs::write(directory.join("__init__.py"), POM_NODES).map_err(failed)?;
-    fs::write(directory.join("web/pom.js"), POM_NODES_WEB).map_err(failed)
+    fs::write(directory.join("web/pom.js"), POM_NODES_WEB).map_err(failed)?;
+    fs::write(directory.join("components.py"), POM_COMPONENTS).map_err(failed)?;
+    fs::write(directory.join("remote.py"), POM_REMOTE).map_err(failed)
 }
 
 fn private_directory(path: &Path) -> Result<(), String> {
@@ -581,6 +585,11 @@ mod tests {
         assert_eq!(text, POM_NODES);
         let web = fs::read_to_string(home.join("custom_nodes/pom_nodes/web/pom.js")).unwrap();
         assert_eq!(web, POM_NODES_WEB);
+        let components =
+            fs::read_to_string(home.join("custom_nodes/pom_nodes/components.py")).unwrap();
+        assert_eq!(components, POM_COMPONENTS);
+        let remote = fs::read_to_string(home.join("custom_nodes/pom_nodes/remote.py")).unwrap();
+        assert_eq!(remote, POM_REMOTE);
         assert!(!text.contains("sk-"), "no key in the node source");
         fs::remove_dir_all(home).unwrap();
     }

@@ -590,3 +590,21 @@ try:
     _prepare_user_directory()
 except Exception as error:  # imported outside a running ComfyUI server
     print(f"[POM] model downloads unavailable: {error}")
+
+try:
+    # The image model components this machine serves to the POM network.
+    import folder_paths as _folder_paths
+
+    from .components import register as _register_components
+
+    _register_components(_folder_paths.base_path)
+except Exception as error:  # imported outside ComfyUI, or as a single file
+    print(f"[POM] image components unavailable: {error}")
+
+try:
+    # The network's components in ComfyUI's ordinary loader nodes.
+    from .remote import install as _install_remote
+
+    _install_remote()
+except Exception as error:  # imported outside ComfyUI, or as a single file
+    print(f"[POM] network models unavailable: {error}")

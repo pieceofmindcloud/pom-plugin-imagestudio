@@ -4,7 +4,7 @@ Open **ComfyUI** in the POM sidebar. On the first visit the installation starts 
 
 ## Which PyTorch
 
-The plugin picks the PyTorch build from the machine: CUDA 12.8 when an NVIDIA driver is present (this includes RTX 50xx cards), ROCm when only an AMD GPU is present, the default build on macOS and the CPU build otherwise. A machine whose GPU changes reinstalls the packages on its next opening.
+The plugin picks the PyTorch build from the machine: CUDA 13.0 with an NVIDIA driver of the 580 series or newer, CUDA 12.8 with an older one (both include RTX 50xx cards), ROCm when only an AMD GPU is present, the default build on macOS and the CPU build otherwise. A machine whose GPU changes reinstalls the packages on its next opening.
 
 ## Your files
 
@@ -21,6 +21,16 @@ The **POM** category of the node library calls the models deployed on your POM c
 | POM Describe Image | asks a multimodal POM model about an image (captions, tags) |
 
 Connect their text output to a text input, such as the prompt of **CLIP Text Encode**. The model list is read from POM when ComfyUI loads; deploy a model in POM and refresh ComfyUI to see it. Change the node's seed to ask again instead of reusing the cached answer.
+
+## Models served on the POM network
+
+An admin can deploy an image model on the network by component: the diffusion model, the text encoder and the VAE each on a machine that already holds that file and runs ComfyUI (POM's **Deploy** screen, **Image model**, or **Deploy on POM** in ComfyUI's menu on an admin node). Those machines' ComfyUI then serve their part; nobody has to keep their screen open, and a machine that restarts serves its part again by itself. Closing ComfyUI with its X on a serving machine stops what it serves there until it reopens.
+
+On any machine of the network, ComfyUI's ordinary loaders list them after the local files, as `POM ▸ <model> ▸ <file>`: **Load Diffusion Model**, **Load CLIP** and **Load VAE**. Pick them in a workflow (the Z-Image template, for one) and queue it: the sampler runs here, while each denoising step, the text encoding and the VAE decode run on the machine that serves that part. Only latents, conditionings and images cross the network (a few MB per step), through this node's POM connection; the weights stay where they are, so a machine without a GPU can use them.
+
+Not yet supported on a network model: LoRAs and other model patches, ControlNet, text encoders given images, and Set CLIP Last Layer; each one stops the run with a clear message. If the serving machine leaves or its ComfyUI stops, the run stops with an error naming that machine.
+
+Each generation that uses network models is recorded in POM's request log as one **Image** request (with the machines and times of each part) and counts against this machine's image budget, when the admins set one; a spent budget stops the run before any GPU work.
 
 ## Preferences
 
