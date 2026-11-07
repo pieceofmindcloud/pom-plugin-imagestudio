@@ -188,29 +188,164 @@ def slug(name):
     return text[:48] or "workflow"
 
 
-def publish(home, name, graph, inputs):
-    """Stores a graph for the Chat; the prompt node must be a text node of
-    the graph. Answers its id."""
+PARAM_TYPES = ("text", "number", "integer", "boolean", "choice", "image")
+MAX_PARAMS = 24
+MAX_TEXT = 8000
+TRUE_WORDS = ("true", "1", "yes", "on")
+FALSE_WORDS = ("false", "0", "no", "off", "")
+# The keys the earlier publish dialog mapped to a node, and the input each sets.
+LEGACY_KEYS = (("prompt", "text", "text", "Prompt"), ("negative", "text", "text", "Negative prompt"),
+               ("image", "image", "image", "Base image"))
+
+
+def _short(value, limit):
+    return value.strip()[:limit] if isinstance(value, str) else ""
+
+
+def _legacy_params(inputs):
+    """The earlier `{prompt, negative?, image?}` choice as parameters."""
+    out = []
+    for key, input_name, kind, label in LEGACY_KEYS:
+        node = (inputs or {}).get(key)
+        if node:
+            out.append({"key": key, "label": label, "node": str(node), "input": input_name, "type": kind})
+    return out
+
+
+def check_params(graph, params):
+    """Validated copies of the parameters; raises ValueError."""
+    if not isinstance(params, list) or len(params) > MAX_PARAMS:
+        raise ValueError(f"a workflow takes at most {MAX_PARAMS} parameters")
+    out, keys = [], set()
+    for raw in params:
+        if not isinstance(raw, dict):
+            raise ValueError("a parameter must be an object")
+        label = _short(raw.get("label"), 60) or _short(raw.get("key"), 60)
+        key = slug(raw.get("key") or label).replace("-", "_")[:40]
+        if not label or key in keys:
+            raise ValueError(f"the parameter keys must be unique ({key})")
+        node, input_name, kind = str(raw.get("node", "")), raw.get("input"), raw.get("type")
+        inputs = (graph.get(node) or {}).get("inputs") or {}
+        if not isinstance(input_name, str) or input_name not in inputs or isinstance(inputs[input_name], list):
+            raise ValueError(f"{label}: the node has no editable input {input_name!r}")
+        if kind not in PARAM_TYPES:
+            raise ValueError(f"{label}: unknown type {kind!r}")
+        if kind == "image" and input_name != "image":
+            raise ValueError(f"{label}: an image parameter must be an image loader's input")
+        param = {"key": key, "label": label, "node": node, "input": input_name, "type": kind}
+        description = _short(raw.get("description"), 300)
+        if description:
+            param["description"] = description
+        if kind == "choice":
+            options = raw.get("options")
+            if not isinstance(options, list) or not options or len(options) > 200:
+                raise ValueError(f"{label}: a choice needs its options")
+            param["options"] = [o for o in options if isinstance(o, (str, int, float))][:200]
+        for bound in ("min", "max"):
+            if kind in ("number", "integer") and isinstance(raw.get(bound), (int, float)) and not isinstance(raw.get(bound), bool):
+                param[bound] = raw[bound]
+        if "default" in raw and kind != "image":
+            param["default"] = coerce(param, raw["default"])
+        keys.add(key)
+        out.append(param)
+    return out
+
+
+def coerce(param, value):
+    """A value of a parameter's type; numbers are clamped to min/max, a choice
+    must be one of its options. Raises ValueError."""
+    kind, label = param["type"], param.get("label", param["key"])
+    if kind == "text":
+        return str(value)[:MAX_TEXT]
+    if kind in ("number", "integer"):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{label} must be a number") from None
+        if number != number:
+            raise ValueError(f"{label} must be a number")
+        if "min" in param:
+            number = max(number, param["min"])
+        if "max" in param:
+            number = min(number, param["max"])
+        return int(round(number)) if kind == "integer" else float(number)
+    if kind == "boolean":
+        if isinstance(value, bool):
+            return value
+        word = str(value).strip().lower()
+        if word in TRUE_WORDS:
+            return True
+        if word in FALSE_WORDS:
+            return False
+        raise ValueError(f"{label} must be true or false")
+    if kind == "choice":
+        for option in param.get("options", []):
+            if option == value or str(option) == str(value):
+                return option
+        raise ValueError(f"{label} must be one of: {', '.join(map(str, param.get('options', [])[:20]))}")
+    raise ValueError(f"{label}: an image is given as a PNG or JPEG data URL")
+
+
+def params_of(record):
+    """A published record's parameters; one published before parameters
+    existed has its `map` read as parameters."""
+    if isinstance(record.get("params"), list):
+        return record["params"]
+    return _legacy_params(record.get("map"))
+
+
+def apply_params(graph, params, values, save_image):
+    """A copy of `graph` with each given value set on its node input (coerced;
+    an image goes through `save_image(data) -> name`). A seed no parameter
+    sets is random, so a run never answers ComfyUI's cached result."""
+    graph = json.loads(json.dumps(graph))
+    seeded = set()
+    for param in params:
+        node = graph.get(param["node"])
+        if node is None:
+            continue
+        if param["type"] in ("integer", "number") and param["input"] in ("seed", "noise_seed"):
+            seeded.add((param["node"], param["input"]))
+        value = (values or {}).get(param["key"])
+        if value is None or (param["type"] == "image" and not value):
+            continue
+        if param["type"] == "image":
+            value = save_image(value)
+        else:
+            value = coerce(param, value)
+        node.setdefault("inputs", {})[param["input"]] = value
+    for node_id, node in graph.items():
+        inputs = node.get("inputs", {})
+        for field in ("seed", "noise_seed"):
+            if field in inputs and not isinstance(inputs[field], list) and (node_id, field) not in seeded:
+                inputs[field] = random.randrange(0, 2**53)
+    return graph
+
+
+def publish(home, name, graph, params, description=""):
+    """Stores a graph for the Chat with its parameters (a list, or the earlier
+    `{prompt, negative?, image?}` node choice). Answers its id."""
     name = (name or "").strip()
     if not name or len(name) > 80:
         raise ValueError("a workflow needs a name of up to 80 characters")
     if not isinstance(graph, dict) or not graph:
         raise ValueError("the workflow is empty")
-    prompt = (inputs or {}).get("prompt")
-    if prompt not in graph or "text" not in graph[prompt].get("inputs", {}):
-        raise ValueError("choose the text node that receives the prompt")
-    negative = (inputs or {}).get("negative")
-    if negative and (negative not in graph or "text" not in graph[negative].get("inputs", {})):
-        raise ValueError("the negative prompt node is not a text node")
-    image = (inputs or {}).get("image")
-    if image and (image not in graph or "image" not in graph[image].get("inputs", {})):
-        raise ValueError("the base image node is not an image loader")
+    if isinstance(params, dict):
+        prompt = params.get("prompt")
+        if prompt not in graph or "text" not in graph[prompt].get("inputs", {}):
+            raise ValueError("choose the text node that receives the prompt")
+        params = _legacy_params(params)
+    params = check_params(graph, params)
+    if not params:
+        raise ValueError("choose at least one input the Chat fills")
     workflow_id = "pub:" + slug(name)
     folder = os.path.join(home, WORKFLOWS_DIR)
     os.makedirs(folder, exist_ok=True)
-    listed = ["prompt"] + (["negative"] if negative else []) + (["image"] if image else [])
-    mapped = {"prompt": prompt, **({"negative": negative} if negative else {}), **({"image": image} if image else {})}
-    record = {"id": workflow_id, "name": name, "inputs": listed, "map": mapped, "graph": graph}
+    keys = [p["key"] for p in params]
+    mapped = {p["key"]: p["node"] for p in params
+              if p["key"] in ("prompt", "negative", "image") and p["type"] in ("text", "image")}
+    record = {"id": workflow_id, "name": name, "description": _short(description, 500),
+              "inputs": keys, "map": mapped, "params": params, "graph": graph}
     path = os.path.join(folder, workflow_id[4:] + ".json")
     with open(path + ".part", "w") as handle:
         json.dump(record, handle)
@@ -288,26 +423,139 @@ def _watch_progress():
     instance.send_sync = send_sync
 
 
-def _images_of(history_entry):
-    import folder_paths
-    from PIL import Image
+MAX_MEDIA = 16
+MAX_MEDIA_BYTES = 32 * 1024 * 1024
+OUTPUT_KEYS = ("images", "gifs", "videos", "video", "audio")
 
+
+def media_kind(head):
+    """(kind, mime) of a file from its first bytes, or None."""
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image", "image/png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image", "image/jpeg"
+    if head.startswith((b"GIF87a", b"GIF89a")):
+        return "image", "image/gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image", "image/webp"
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return "audio", "audio/wav"
+    if head[4:8] == b"ftyp":
+        return "video", "video/mp4"
+    if head.startswith(b"\x1aE\xdf\xa3"):
+        return "video", "video/webm"
+    if head.startswith(b"ID3") or (len(head) > 1 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0):
+        return "audio", "audio/mpeg"
+    if head.startswith(b"fLaC"):
+        return "audio", "audio/flac"
+    if head.startswith(b"OggS"):
+        return "audio", "audio/ogg"
+    return None
+
+
+def _size_of(path):
+    try:
+        from PIL import Image
+
+        with Image.open(path) as picture:
+            return picture.size
+    except Exception:
+        return None
+
+
+def collect_media(history_entry, base):
+    """Every file the run saved under `base` (ComfyUI's output folder): images,
+    animations and videos, audio; at most 16 files of 32 MiB, each a
+    `{kind, mime, data, width?, height?}` with base64 data."""
     out = []
+    root = os.path.normpath(base) + os.sep
     for output in (history_entry.get("outputs") or {}).values():
-        for image in output.get("images") or []:
-            if image.get("type") != "output":
-                continue
-            base = folder_paths.get_output_directory()
-            path = os.path.normpath(os.path.join(base, image.get("subfolder", ""), image["filename"]))
-            if not path.startswith(os.path.normpath(base) + os.sep):
-                continue
-            with open(path, "rb") as handle:
-                data = handle.read()
-            with Image.open(path) as picture:
-                width, height = picture.size
-            out.append({"mime": "image/png", "width": width, "height": height,
-                        "data": base64.b64encode(data).decode()})
+        for key in OUTPUT_KEYS:
+            for item in output.get(key) or []:
+                if len(out) >= MAX_MEDIA:
+                    return out
+                if not isinstance(item, dict) or item.get("type") != "output" or not item.get("filename"):
+                    continue
+                path = os.path.normpath(os.path.join(base, item.get("subfolder") or "", item["filename"]))
+                if not path.startswith(root) or not os.path.isfile(path):
+                    continue
+                if os.path.getsize(path) > MAX_MEDIA_BYTES:
+                    continue
+                with open(path, "rb") as handle:
+                    data = handle.read()
+                found = media_kind(data[:16])
+                if found is None:
+                    continue
+                entry = {"kind": found[0], "mime": found[1], "data": base64.b64encode(data).decode()}
+                if found[0] == "image":
+                    size = _size_of(path)
+                    if size:
+                        entry["width"], entry["height"] = size
+                out.append(entry)
     return out
+
+
+def _media_of(history_entry):
+    import folder_paths
+
+    return collect_media(history_entry, folder_paths.get_output_directory())
+
+
+def listing(record):
+    """What the service lists of a published workflow (never its graph)."""
+    return {"id": record["id"], "name": record["name"], "description": record.get("description", ""),
+            "inputs": record.get("inputs", []), "params": params_of(record)}
+
+
+def find_published(home, workflow_id):
+    for record in published(home):
+        if record.get("id") == workflow_id:
+            return record
+    return None
+
+
+def prepare(home, body):
+    """The graph a run request queues (blocking: reads files, the network's
+    components). Raises ValueError."""
+    from . import remote
+
+    workflow_id = str(body.get("workflow_id", ""))
+    record = find_published(home, workflow_id) if workflow_id.startswith("pub:") else None
+
+    def save_image(data):
+        import folder_paths
+
+        return save_base_image(data, folder_paths.get_input_directory())
+
+    if record is not None and isinstance(record.get("params"), list):
+        params = record["params"]
+        values = dict(body.get("params") or {}) if isinstance(body.get("params"), dict) else {}
+        for key in ("prompt", "negative", "image"):
+            if values.get(key) is None and body.get(key):
+                values[key] = body[key]
+        if body.get("image") and not any(p["type"] == "image" for p in params):
+            raise ValueError("this workflow takes no base image")
+        return apply_params(record["graph"], params, values, save_image)
+
+    prompt = (body.get("prompt") or "").strip()
+    if not prompt:
+        raise ValueError("write what the image should show")
+    has_image = bool(body.get("image"))
+    entries = remote.network_components() if workflow_id.startswith("builtin:") else []
+    graph, inputs_map = resolve(home, workflow_id, entries, base_image=has_image)
+    values = dict(body)
+    if has_image:
+        values["image_name"] = save_image(body["image"])
+        values.setdefault("strength", DEFAULT_STRENGTH)
+    return substitute(graph, inputs_map, values)
+
+
+def final_line(media):
+    """The run's last NDJSON line: every output, and its images in the earlier
+    `images` form for nodes that read only that."""
+    images = [{"mime": m["mime"], "width": m.get("width", 0), "height": m.get("height", 0), "data": m["data"]}
+              for m in media if m["kind"] == "image"]
+    return {"media": media, "images": images[:MAX_COUNT]}
 
 
 def register(home):
@@ -318,8 +566,6 @@ def register(home):
     from aiohttp import web
     from server import PromptServer
 
-    from . import remote
-
     _watch_progress()
     routes = PromptServer.instance.routes
 
@@ -329,23 +575,11 @@ def register(home):
             body = await request.json()
         except Exception:
             return web.json_response({"error": "the request is not JSON"}, status=400)
-        prompt = (body.get("prompt") or "").strip()
-        if not prompt:
-            return web.json_response({"error": "write what the image should show"}, status=400)
         loop = asyncio.get_running_loop()
         try:
-            entries = await loop.run_in_executor(None, remote.network_components)
-            has_image = bool(body.get("image"))
-            graph, inputs_map = resolve(home, str(body.get("workflow_id", "")), entries, base_image=has_image)
-            values = dict(body)
-            if has_image:
-                import folder_paths
-
-                values["image_name"] = save_base_image(body["image"], folder_paths.get_input_directory())
-                values.setdefault("strength", DEFAULT_STRENGTH)
+            graph = await loop.run_in_executor(None, prepare, home, body)
         except ValueError as error:
             return web.json_response({"error": str(error)}, status=400)
-        graph = substitute(graph, inputs_map, values)
 
         response = web.StreamResponse(headers={"content-type": "application/x-ndjson"})
         await response.prepare(request)
@@ -385,11 +619,11 @@ def register(home):
                         reason = messages[-1][1].get("exception_message", "the workflow failed") if messages else "the workflow failed"
                         await line({"error": str(reason)[:500]})
                         return response
-                    images = await loop.run_in_executor(None, _images_of, entry)
-                    if not images:
-                        await line({"error": "the workflow made no image"})
+                    media = await loop.run_in_executor(None, _media_of, entry)
+                    if not media:
+                        await line({"error": "the workflow saved no image, video or audio"})
                     else:
-                        await line({"images": images[:MAX_COUNT]})
+                        await line(final_line(media))
                     return response
                 try:
                     event, data = await asyncio.wait_for(queue.get(), timeout=0.5)
@@ -411,7 +645,10 @@ def register(home):
             return web.json_response({"error": "only an admin of the network publishes workflows"}, status=403)
         try:
             body = await request.json()
-            workflow_id = publish(home, body.get("name"), body.get("graph"), body.get("inputs") or {})
+            params = body.get("params")
+            workflow_id = publish(home, body.get("name"), body.get("graph"),
+                                  params if isinstance(params, list) else (body.get("inputs") or {}),
+                                  body.get("description") or "")
         except (ValueError, AttributeError) as error:
             return web.json_response({"error": str(error)}, status=400)
         return web.json_response({"id": workflow_id})
@@ -419,7 +656,7 @@ def register(home):
     @routes.get("/pom/workflow/list")
     async def list_route(request):
         return web.json_response({"workflows": [
-            {"id": r["id"], "name": r["name"], "inputs": r.get("inputs", [])} for r in published(home)
+            listing(r) for r in published(home)
         ]})
 
 

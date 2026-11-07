@@ -247,31 +247,92 @@ async function openDeployDialog() {
   listDeployed();
 }
 
-// "Publish to Chat": the open workflow becomes one POM's Chat can run; the
-// person picks the text node that receives the prompt (and the negative).
+// "Publish to Chat": the open workflow becomes a function of POM's Chat (and
+// of its API). Every editable input of the graph is listed; each one checked
+// becomes a parameter the Chat fills, with its type, bounds and options read
+// from the node's widget. The node checks the role and the shape again.
+function slugOf(text) {
+  return String(text).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40) || "input";
+}
+
+function candidatesOf(output) {
+  const found = [];
+  for (const [id, node] of Object.entries(output || {})) {
+    const widgets = app.graph?.getNodeById?.(Number(id))?.widgets || [];
+    for (const [input, value] of Object.entries(node?.inputs || {})) {
+      if (Array.isArray(value) || value === null || typeof value === "object") continue;
+      const widget = widgets.find((w) => w.name === input);
+      const options = widget?.options || {};
+      const title = node._meta?.title || node.class_type;
+      const param = { node: id, input, label: input === "text" ? title : `${title} ${input}`, default: value };
+      if (node.class_type === "LoadImage" && input === "image") param.type = "image";
+      else if (typeof value === "boolean") param.type = "boolean";
+      else if (Array.isArray(options.values) && options.values.length) {
+        param.type = "choice";
+        param.options = options.values.slice(0, 200);
+      } else if (typeof value === "number") {
+        // ComfyUI's INT widgets have precision 0 (round 1); FLOAT ones a fraction.
+        const whole = options.precision === 0 || options.round === 1 ||
+          (options.precision === undefined && options.round === undefined && Number.isInteger(value));
+        param.type = whole ? "integer" : "number";
+        if (typeof options.min === "number") param.min = options.min;
+        if (typeof options.max === "number") param.max = options.max;
+      } else if (typeof value === "string") param.type = "text";
+      else continue;
+      // Text prompts and the image loaders are what a Chat usually fills.
+      param.checked = param.type === "image" || (param.type === "text" && input === "text");
+      found.push(param);
+    }
+  }
+  return found;
+}
+
 async function openPublishDialog() {
   const field = "width:100%;box-sizing:border-box;margin:4px 0 10px;padding:6px;border-radius:6px;" +
     "border:1px solid var(--border-color,#444);background:var(--comfy-input-bg,#111);color:inherit";
+  const small = "box-sizing:border-box;padding:3px 6px;border-radius:5px;" +
+    "border:1px solid var(--border-color,#444);background:var(--comfy-input-bg,#111);color:inherit";
   const { output } = await app.graphToPrompt();
-  const textNodes = Object.entries(output || {}).filter(([, node]) => typeof node?.inputs?.text === "string");
-  const imageNodes = Object.entries(output || {}).filter(([, node]) => node?.class_type === "LoadImage");
+  const candidates = candidatesOf(output);
   const status = element("p", { style: "min-height:1.2em;margin:6px 0;color:var(--error-text,#f88)" });
   const name = element("input", { style: field, placeholder: "What this workflow makes" });
-  const option = ([id, node]) => element("option", { value: id }, `#${id} ${node._meta?.title || node.class_type}`);
-  const prompt = element("select", { style: field }, ...textNodes.map(option));
-  const negative = element("select", { style: field }, element("option", { value: "" }, "None"), ...textNodes.map(option));
-  const image = element("select", { style: field }, element("option", { value: "" }, "None"), ...imageNodes.map(option));
+  const description = element("textarea", { style: field + ";min-height:52px", rows: "2",
+    placeholder: "What it does and when to use it (the Chat's model reads this)" });
+  const rows = candidates.map((param) => {
+    const check = element("input", { type: "checkbox" });
+    check.checked = param.checked;
+    const label = element("input", { style: small + ";flex:1;min-width:0", value: param.label });
+    const hint = element("input", { style: small + ";flex:1;min-width:0", placeholder: "Hint (optional)" });
+    const row = element("div", { style: "display:flex;gap:6px;align-items:center;margin:3px 0" },
+      check, label, hint,
+      element("span", { style: "opacity:.7;font-size:11px;width:110px;text-align:right" },
+        `#${param.node} ${param.type}`));
+    return { param, check, label, hint, row };
+  });
   const close = () => overlay.remove();
   const submit = element("button", { type: "button", style: "padding:6px 14px", onclick: async () => {
     status.textContent = "";
+    const keys = new Set();
+    const params = rows.filter((r) => r.check.checked).map(({ param, label, hint }) => {
+      let key = param.type === "image" && !keys.has("image") ? "image" : slugOf(label.value);
+      for (let n = 2; keys.has(key); n += 1) key = `${slugOf(label.value)}_${n}`;
+      keys.add(key);
+      const out = { key, label: label.value.trim() || param.label, node: param.node, input: param.input, type: param.type };
+      if (hint.value.trim()) out.description = hint.value.trim();
+      for (const field of ["min", "max", "options"]) if (param[field] !== undefined) out[field] = param[field];
+      if (param.type !== "image") out.default = param.default;
+      return out;
+    });
+    if (!params.length) {
+      status.textContent = "Check at least one input the Chat fills.";
+      return;
+    }
     submit.disabled = true;
     try {
       const response = await api.fetchApi("/pom/workflow/publish", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: name.value.trim(), graph: output,
-          inputs: { prompt: prompt.value, ...(negative.value ? { negative: negative.value } : {}),
-            ...(image.value ? { image: image.value } : {}) } }),
+        body: JSON.stringify({ name: name.value.trim(), description: description.value.trim(), graph: output, params }),
       });
       const answer = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(answer.error || `HTTP ${response.status}`);
@@ -286,20 +347,20 @@ async function openPublishDialog() {
   const box = element(
     "div",
     { role: "dialog", "aria-label": "Publish to Chat",
-      style: "width:min(480px,92vw);padding:16px 18px;border-radius:10px;" +
+      style: "width:min(640px,94vw);max-height:90vh;overflow:auto;padding:16px 18px;border-radius:10px;" +
         "background:var(--comfy-menu-bg,#222);color:var(--fg-color,#ddd);font:13px/1.5 sans-serif" },
     element("h3", { style: "margin:0 0 8px" }, "Publish to POM's Chat"),
-    textNodes.length === 0
-      ? element("p", {}, "This workflow has no text node to receive the prompt.")
+    candidates.length === 0
+      ? element("p", {}, "This workflow has no input the Chat could fill.")
       : element("div", {},
           element("label", {}, "Name", name),
-          element("label", {}, "The prompt goes to", prompt),
-          element("label", {}, "The negative prompt goes to", negative),
-          ...(imageNodes.length ? [element("label", {}, "An image sent in the Chat goes to", image)] : [])),
+          element("label", {}, "Description", description),
+          element("p", { style: "margin:4px 0" }, "Inputs the Chat fills (the others keep their values):"),
+          ...rows.map((r) => r.row)),
     status,
     element("div", { style: "display:flex;gap:8px;justify-content:flex-end" },
       element("button", { type: "button", style: "padding:6px 14px", onclick: close }, "Close"),
-      ...(textNodes.length ? [submit] : [])),
+      ...(candidates.length ? [submit] : [])),
   );
   const overlay = element(
     "div",

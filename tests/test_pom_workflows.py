@@ -120,5 +120,118 @@ class BaseImageTests(unittest.TestCase):
             self.assertIn("image", pom_workflows.published(home)[0]["inputs"])
 
 
+GRAPH = {
+    "3": {"class_type": "KSampler", "inputs": {"seed": 5, "steps": 20, "cfg": 7.0, "sampler_name": "euler", "model": ["4", 0]}},
+    "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "a cat"}},
+    "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "x", "upscale": False}},
+    "20": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+}
+PARAMS = [
+    {"key": "prompt", "label": "Prompt", "node": "6", "input": "text", "type": "text"},
+    {"key": "steps", "label": "Steps", "node": "3", "input": "steps", "type": "integer", "min": 1, "max": 50, "default": 20},
+    {"key": "cfg", "label": "CFG", "node": "3", "input": "cfg", "type": "number", "min": 0, "max": 20},
+    {"key": "sampler", "label": "Sampler", "node": "3", "input": "sampler_name", "type": "choice", "options": ["euler", "dpmpp_2m"]},
+    {"key": "upscale", "label": "Upscale", "node": "9", "input": "upscale", "type": "boolean"},
+    {"key": "photo", "label": "Photo", "node": "20", "input": "image", "type": "image"},
+]
+
+
+class ParamTests(unittest.TestCase):
+    def test_publish_with_typed_params(self):
+        with tempfile.TemporaryDirectory() as home:
+            workflow_id = pom_workflows.publish(home, "Typed", GRAPH, PARAMS, "Paints a picture")
+            record = pom_workflows.published(home)[0]
+            self.assertEqual(workflow_id, "pub:typed")
+            self.assertEqual(record["description"], "Paints a picture")
+            self.assertEqual([p["key"] for p in pom_workflows.params_of(record)],
+                             ["prompt", "steps", "cfg", "sampler", "upscale", "photo"])
+
+    def test_publish_refuses_bad_params(self):
+        with tempfile.TemporaryDirectory() as home:
+            bad = [
+                [{"key": "x", "label": "X", "node": "99", "input": "text", "type": "text"}],
+                [{"key": "x", "label": "X", "node": "3", "input": "model", "type": "text"}],
+                [{"key": "x", "label": "X", "node": "3", "input": "steps", "type": "weird"}],
+                [{"key": "x", "label": "X", "node": "3", "input": "sampler_name", "type": "choice"}],
+                [{"key": "x", "label": "X", "node": "6", "input": "text", "type": "image"}],
+                [{"key": "x", "label": "X", "node": "6", "input": "text", "type": "text"}] * 2,
+                [{"key": f"k{i}", "label": "X", "node": "6", "input": "text", "type": "text"} for i in range(25)],
+            ]
+            for params in bad:
+                with self.assertRaises(ValueError, msg=params[0]):
+                    pom_workflows.publish(home, "bad", GRAPH, params)
+
+    def test_old_map_is_read_as_params(self):
+        record = {"id": "pub:old", "name": "old", "inputs": ["prompt", "image"],
+                  "map": {"prompt": "6", "image": "20"}, "graph": GRAPH}
+        params = pom_workflows.params_of(record)
+        self.assertEqual([(p["key"], p["node"], p["input"], p["type"]) for p in params],
+                         [("prompt", "6", "text", "text"), ("image", "20", "image", "image")])
+        out = pom_workflows.apply_params(GRAPH, params, {"prompt": "a dog"}, lambda data: "unused")
+        self.assertEqual(out["6"]["inputs"]["text"], "a dog")
+
+    def test_values_are_coerced(self):
+        saved = []
+        out = pom_workflows.apply_params(GRAPH, PARAMS, {
+            "steps": 500, "cfg": "-3", "sampler": "dpmpp_2m", "upscale": "true", "photo": "data:..."},
+            lambda data: saved.append(data) or "pom-chat/h.png")
+        self.assertEqual(out["3"]["inputs"]["steps"], 50)
+        self.assertEqual(out["3"]["inputs"]["cfg"], 0.0)
+        self.assertEqual(out["3"]["inputs"]["sampler_name"], "dpmpp_2m")
+        self.assertIs(out["9"]["inputs"]["upscale"], True)
+        self.assertEqual(out["20"]["inputs"]["image"], "pom-chat/h.png")
+        self.assertEqual(out["6"]["inputs"]["text"], "a cat")  # not given: the graph's value
+        self.assertEqual(GRAPH["3"]["inputs"]["steps"], 20)  # the stored graph is untouched
+        with self.assertRaises(ValueError):
+            pom_workflows.apply_params(GRAPH, PARAMS, {"sampler": "ddim"}, lambda d: "")
+        with self.assertRaises(ValueError):
+            pom_workflows.apply_params(GRAPH, PARAMS, {"steps": "many"}, lambda d: "")
+        with self.assertRaises(ValueError):
+            pom_workflows.apply_params(GRAPH, PARAMS, {"upscale": "maybe"}, lambda d: "")
+
+    def test_the_seed_is_random_unless_it_is_a_param(self):
+        out = pom_workflows.apply_params(GRAPH, PARAMS, {}, lambda d: "")
+        self.assertIsInstance(out["3"]["inputs"]["seed"], int)
+        seeded = PARAMS + [{"key": "seed", "label": "Seed", "node": "3", "input": "seed", "type": "integer"}]
+        self.assertEqual(pom_workflows.apply_params(GRAPH, seeded, {"seed": 7}, lambda d: "")["3"]["inputs"]["seed"], 7)
+
+
+class MediaTests(unittest.TestCase):
+    def test_kinds_by_magic(self):
+        kind = pom_workflows.media_kind
+        self.assertEqual(kind(b"\x89PNG\r\n\x1a\nxx"), ("image", "image/png"))
+        self.assertEqual(kind(b"\xff\xd8\xffxx"), ("image", "image/jpeg"))
+        self.assertEqual(kind(b"RIFF\0\0\0\0WEBPVP8 "), ("image", "image/webp"))
+        self.assertEqual(kind(b"GIF89axx"), ("image", "image/gif"))
+        self.assertEqual(kind(b"\0\0\0\x18ftypmp42"), ("video", "video/mp4"))
+        self.assertEqual(kind(b"\x1aE\xdf\xa3xx"), ("video", "video/webm"))
+        self.assertEqual(kind(b"RIFF\0\0\0\0WAVEfmt "), ("audio", "audio/wav"))
+        self.assertEqual(kind(b"ID3\x04xx"), ("audio", "audio/mpeg"))
+        self.assertEqual(kind(b"fLaCxx"), ("audio", "audio/flac"))
+        self.assertEqual(kind(b"OggSxx"), ("audio", "audio/ogg"))
+        self.assertIsNone(kind(b"plain text"))
+
+    def test_outputs_are_collected(self):
+        with tempfile.TemporaryDirectory() as base:
+            os.makedirs(os.path.join(base, "sub"))
+            files = {"a.png": b"\x89PNG\r\n\x1a\nxx", "sub/b.mp4": b"\0\0\0\x18ftypmp42",
+                     "c.flac": b"fLaCxx", "d.txt": b"nope", "t.png": b"\x89PNG\r\n\x1a\nyy"}
+            for name, data in files.items():
+                Path(base, name).write_bytes(data)
+            entry = {"outputs": {
+                "9": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"},
+                                 {"filename": "t.png", "subfolder": "", "type": "temp"}]},
+                "10": {"gifs": [{"filename": "b.mp4", "subfolder": "sub", "type": "output"}]},
+                "11": {"audio": [{"filename": "c.flac", "subfolder": "", "type": "output"},
+                                 {"filename": "d.txt", "subfolder": "", "type": "output"},
+                                 {"filename": "../../etc/passwd", "subfolder": "", "type": "output"}]},
+            }}
+            media = pom_workflows.collect_media(entry, base)
+            self.assertEqual([(m["kind"], m["mime"]) for m in media],
+                             [("image", "image/png"), ("video", "video/mp4"), ("audio", "audio/flac")])
+            import base64
+            self.assertEqual(base64.b64decode(media[2]["data"]), b"fLaCxx")
+
+
 if __name__ == "__main__":
     unittest.main()

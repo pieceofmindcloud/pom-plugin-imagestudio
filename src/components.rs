@@ -18,6 +18,31 @@ const IN_FLIGHT_FILE: &str = "pom-inflight.json";
 /// Workflows an admin published for the Chat (`runtime/pom_workflows.py`).
 const WORKFLOWS_DIR: &str = "user/pom-workflows";
 
+/// A published workflow's parameters; one published before parameters
+/// existed has its `map` (prompt, negative, image nodes) read as parameters,
+/// as `pom_workflows.params_of` does.
+fn params_of(record: &Value) -> Value {
+    if record["params"].is_array() {
+        return record["params"].clone();
+    }
+    let legacy = [
+        ("prompt", "text", "text", "Prompt"),
+        ("negative", "text", "text", "Negative prompt"),
+        ("image", "image", "image", "Base image"),
+    ];
+    Value::Array(
+        legacy
+            .iter()
+            .filter_map(|(key, input, kind, label)| {
+                let node = record["map"][key].as_str()?;
+                Some(
+                    json!({"key": key, "label": label, "node": node, "input": input, "type": kind}),
+                )
+            })
+            .collect(),
+    )
+}
+
 /// ComfyUI's copy of this node's list, in the plugin's own directory: the
 /// nodes of one machine share one ComfyUI home (the workspace), so a file
 /// there would hold whichever node wrote last. ComfyUI finds it through
@@ -186,6 +211,8 @@ impl Served {
             {
                 list.push(json!({
                     "id": record["id"], "name": record["name"], "inputs": record["inputs"],
+                    "description": record["description"].as_str().unwrap_or(""),
+                    "params": params_of(&record),
                 }));
             }
         }
@@ -297,7 +324,14 @@ mod tests {
         std::fs::create_dir_all(home.join(WORKFLOWS_DIR)).unwrap();
         std::fs::write(
             home.join(WORKFLOWS_DIR).join("sketch.json"),
-            r#"{"id": "pub:sketch", "name": "Sketch", "inputs": ["prompt"], "graph": {}}"#,
+            r#"{"id": "pub:sketch", "name": "Sketch", "inputs": ["prompt"], "map": {"prompt": "6"}, "graph": {}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(WORKFLOWS_DIR).join("typed.json"),
+            r#"{"id": "pub:typed", "name": "Typed", "description": "Paints", "inputs": ["steps"],
+                "params": [{"key": "steps", "label": "Steps", "node": "3", "input": "steps", "type": "integer", "max": 50}],
+                "graph": {}}"#,
         )
         .unwrap();
         let service = served.service("ready", "");
@@ -312,12 +346,19 @@ mod tests {
         let workflows = service["workflows"].as_array().unwrap();
         assert_eq!(
             workflows.len(),
-            2,
+            3,
             "one built-in per deployment, then the published"
         );
         assert_eq!(workflows[0]["id"], "builtin:img-1");
         assert_eq!(workflows[1]["id"], "pub:sketch");
         assert!(workflows[1].get("graph").is_none(), "the graph stays here");
+        assert_eq!(
+            workflows[1]["params"],
+            json!([{"key": "prompt", "label": "Prompt", "node": "6", "input": "text", "type": "text"}]),
+            "an earlier map is listed as parameters"
+        );
+        assert_eq!(workflows[2]["description"], "Paints");
+        assert_eq!(workflows[2]["params"][0]["max"], 50);
     }
 
     #[test]
