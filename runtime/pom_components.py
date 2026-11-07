@@ -59,7 +59,9 @@ class ServedList:
     """`pom-served.json`, read again whenever it changes."""
 
     def __init__(self, home):
-        self.path = os.path.join(home, SERVED_FILE)
+        # The node's own copy (POM_SERVED_FILE): the nodes of one machine share
+        # ComfyUI's home, so a file there would hold whichever node wrote last.
+        self.path = os.environ.get("POM_SERVED_FILE") or os.path.join(home, SERVED_FILE)
         self.mtime = None
         self.entries = []
         self.lock = threading.Lock()
@@ -93,7 +95,7 @@ class InFlight:
     FILE = "pom-inflight.json"
 
     def __init__(self, home):
-        self.path = os.path.join(home, self.FILE)
+        self.path = os.environ.get("POM_INFLIGHT_FILE") or os.path.join(home, self.FILE)
         self.counts = {}
         self.lock = threading.Lock()
 

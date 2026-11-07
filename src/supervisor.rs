@@ -281,6 +281,13 @@ impl Supervisor {
             .current_dir(&base)
             .env_remove("PYTHONPATH")
             .env("POM_COMFYUI_ARGS", comfy_args(&context).join("\n"))
+            // This node's own served list and in-flight counts: the nodes of one
+            // machine share ComfyUI's home, so these never live there.
+            .env("POM_SERVED_FILE", crate::components::comfy_file(&base))
+            .env(
+                "POM_INFLIGHT_FILE",
+                crate::components::in_flight_file(&base),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(log);

@@ -18,9 +18,23 @@ const IN_FLIGHT_FILE: &str = "pom-inflight.json";
 /// Workflows an admin published for the Chat (`runtime/pom_workflows.py`).
 const WORKFLOWS_DIR: &str = "user/pom-workflows";
 
+/// ComfyUI's copy of this node's list, in the plugin's own directory: the
+/// nodes of one machine share one ComfyUI home (the workspace), so a file
+/// there would hold whichever node wrote last. ComfyUI finds it through
+/// `POM_SERVED_FILE` (`supervisor::bridge_env`).
+pub fn comfy_file(state: &Path) -> PathBuf {
+    state.join(COMFY_FILE)
+}
+
+/// Where ComfyUI counts this node's calls in flight (`POM_INFLIGHT_FILE`).
+pub fn in_flight_file(state: &Path) -> PathBuf {
+    state.join(IN_FLIGHT_FILE)
+}
+
 pub struct Served {
     list: PathBuf,
     comfy: PathBuf,
+    in_flight: PathBuf,
     home: PathBuf,
     items: Mutex<Vec<Value>>,
 }
@@ -45,7 +59,8 @@ impl Served {
             .unwrap_or_default();
         Self {
             list,
-            comfy: home.join(COMFY_FILE),
+            comfy: comfy_file(state),
+            in_flight: in_flight_file(state),
             home: home.to_path_buf(),
             items: Mutex::new(items),
         }
@@ -184,7 +199,7 @@ impl Served {
             "error" => "error",
             _ => "loading",
         };
-        let in_flight: Value = fs::read(self.home.join(IN_FLIGHT_FILE))
+        let in_flight: Value = fs::read(&self.in_flight)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or(Value::Null);
@@ -278,7 +293,7 @@ mod tests {
         served
             .serve(&assignment("img-1", "diffusion", &model), true)
             .unwrap();
-        std::fs::write(home.join(IN_FLIGHT_FILE), r#"{"img-1/vae": 2}"#).unwrap();
+        std::fs::write(in_flight_file(&state), r#"{"img-1/vae": 2}"#).unwrap();
         std::fs::create_dir_all(home.join(WORKFLOWS_DIR)).unwrap();
         std::fs::write(
             home.join(WORKFLOWS_DIR).join("sketch.json"),
@@ -404,6 +419,27 @@ mod tests {
     }
 
     #[test]
+    fn two_nodes_sharing_a_home_keep_their_own_lists() {
+        let (_root, state, home, model) = dirs();
+        let other_state = state.with_file_name("other-plugin");
+        let gpu1 = Served::new(&state, &home);
+        let gpu2 = Served::new(&other_state, &home);
+        gpu1.serve(&assignment("img-1", "vae", &model), true)
+            .unwrap();
+        gpu2.serve(&assignment("img-1", "diffusion", &model), true)
+            .unwrap();
+        let read = |dir: &Path| -> Value {
+            serde_json::from_slice(&std::fs::read(comfy_file(dir)).unwrap()).unwrap()
+        };
+        assert_eq!(read(&state)[0]["component"], "vae");
+        assert_eq!(read(&other_state)[0]["component"], "diffusion");
+        assert!(
+            !home.join(COMFY_FILE).exists(),
+            "nothing shared in ComfyUI's home"
+        );
+    }
+
+    #[test]
     fn the_served_file_is_written_for_comfyui() {
         let (_root, state, home, model) = dirs();
         let served = Served::new(&state, &home);
@@ -411,13 +447,13 @@ mod tests {
             .serve(&assignment("img-1", "vae", &model), true)
             .unwrap();
         let written: Value =
-            serde_json::from_slice(&std::fs::read(home.join("pom-served.json")).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(comfy_file(&state)).unwrap()).unwrap();
         assert_eq!(written[0]["deploy_id"], "img-1");
         assert_eq!(written[0]["component"], "vae");
         assert_eq!(written[0]["paths"][0], json!(model));
         served.release("img-1", None);
         let written: Value =
-            serde_json::from_slice(&std::fs::read(home.join("pom-served.json")).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(comfy_file(&state)).unwrap()).unwrap();
         assert_eq!(written, json!([]));
     }
 
