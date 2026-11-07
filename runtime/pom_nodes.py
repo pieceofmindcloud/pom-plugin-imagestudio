@@ -683,6 +683,16 @@ except Exception as error:  # imported outside ComfyUI, or as a single file
     print(f"[POM] image components unavailable: {error}")
 
 try:
+    # The workflows POM's Chat runs here (`/pom/workflow/*`).
+    import folder_paths as _folder_paths
+
+    from .workflows import register as _register_workflows
+
+    _register_workflows(_folder_paths.base_path)
+except Exception as error:  # imported outside ComfyUI, or as a single file
+    print(f"[POM] Chat workflows unavailable: {error}")
+
+try:
     # The network's components in ComfyUI's ordinary loader nodes.
     from .remote import install as _install_remote
 

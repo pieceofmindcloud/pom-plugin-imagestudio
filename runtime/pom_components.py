@@ -85,6 +85,34 @@ class ServedList:
             return None
 
 
+class InFlight:
+    """Calls being served now per `<deploy_id>/<component>`, written to
+    `pom-inflight.json` for the plugin's `image` service (POM picks the least
+    busy replica)."""
+
+    FILE = "pom-inflight.json"
+
+    def __init__(self, home):
+        self.path = os.path.join(home, self.FILE)
+        self.counts = {}
+        self.lock = threading.Lock()
+
+    def change(self, deploy_id, component, delta):
+        key = f"{deploy_id}/{component}"
+        with self.lock:
+            count = max(0, self.counts.get(key, 0) + delta)
+            if count:
+                self.counts[key] = count
+            else:
+                self.counts.pop(key, None)
+            try:
+                with open(self.path + ".part", "w") as handle:
+                    json.dump(self.counts, handle)
+                os.replace(self.path + ".part", self.path)
+            except OSError:
+                pass
+
+
 # --- Running the ops (ComfyUI side) -------------------------------------------
 
 _cache = {}
@@ -328,6 +356,11 @@ def register(home):
     from server import PromptServer
 
     served = ServedList(home)
+    in_flight = InFlight(home)
+    try:
+        os.remove(in_flight.path)
+    except OSError:
+        pass
     threading.Thread(target=_watch_idle, name="pom-idle-unload", daemon=True).start()
     routes = PromptServer.instance.routes
 
@@ -344,10 +377,12 @@ def register(home):
         def work():
             import time
 
+            in_flight.change(deploy_id, name, 1)
             try:
                 with _lock_for((deploy_id, name)):
                     return run_op(entry, name, op, body)
             finally:
+                in_flight.change(deploy_id, name, -1)
                 _idle.note_op(time.monotonic())
 
         try:

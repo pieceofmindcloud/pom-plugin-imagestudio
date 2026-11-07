@@ -21,6 +21,7 @@ const POM_NODES: &str = include_str!("../runtime/pom_nodes.py");
 const POM_NODES_WEB: &str = include_str!("../runtime/web/pom.js");
 const POM_COMPONENTS: &str = include_str!("../runtime/pom_components.py");
 const POM_REMOTE: &str = include_str!("../runtime/pom_remote.py");
+const POM_WORKFLOWS: &str = include_str!("../runtime/pom_workflows.py");
 
 struct Running {
     child: Child,
@@ -513,7 +514,8 @@ pub(crate) fn install_pom_nodes(home: &Path) -> Result<(), String> {
     fs::write(directory.join("__init__.py"), POM_NODES).map_err(failed)?;
     fs::write(directory.join("web/pom.js"), POM_NODES_WEB).map_err(failed)?;
     fs::write(directory.join("components.py"), POM_COMPONENTS).map_err(failed)?;
-    fs::write(directory.join("remote.py"), POM_REMOTE).map_err(failed)
+    fs::write(directory.join("remote.py"), POM_REMOTE).map_err(failed)?;
+    fs::write(directory.join("workflows.py"), POM_WORKFLOWS).map_err(failed)
 }
 
 /// The installation's folder inside the plugin's directory.

@@ -247,6 +247,65 @@ async function openDeployDialog() {
   listDeployed();
 }
 
+// "Publish to Chat": the open workflow becomes one POM's Chat can run; the
+// person picks the text node that receives the prompt (and the negative).
+async function openPublishDialog() {
+  const field = "width:100%;box-sizing:border-box;margin:4px 0 10px;padding:6px;border-radius:6px;" +
+    "border:1px solid var(--border-color,#444);background:var(--comfy-input-bg,#111);color:inherit";
+  const { output } = await app.graphToPrompt();
+  const textNodes = Object.entries(output || {}).filter(([, node]) => typeof node?.inputs?.text === "string");
+  const status = element("p", { style: "min-height:1.2em;margin:6px 0;color:var(--error-text,#f88)" });
+  const name = element("input", { style: field, placeholder: "What this workflow makes" });
+  const option = ([id, node]) => element("option", { value: id }, `#${id} ${node._meta?.title || node.class_type}`);
+  const prompt = element("select", { style: field }, ...textNodes.map(option));
+  const negative = element("select", { style: field }, element("option", { value: "" }, "None"), ...textNodes.map(option));
+  const close = () => overlay.remove();
+  const submit = element("button", { type: "button", style: "padding:6px 14px", onclick: async () => {
+    status.textContent = "";
+    submit.disabled = true;
+    try {
+      const response = await api.fetchApi("/pom/workflow/publish", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: name.value.trim(), graph: output,
+          inputs: { prompt: prompt.value, ...(negative.value ? { negative: negative.value } : {}) } }),
+      });
+      const answer = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(answer.error || `HTTP ${response.status}`);
+      toast("success", "Published to POM's Chat", answer.id);
+      close();
+    } catch (error) {
+      status.textContent = error.message;
+    } finally {
+      submit.disabled = false;
+    }
+  } }, "Publish");
+  const box = element(
+    "div",
+    { role: "dialog", "aria-label": "Publish to Chat",
+      style: "width:min(480px,92vw);padding:16px 18px;border-radius:10px;" +
+        "background:var(--comfy-menu-bg,#222);color:var(--fg-color,#ddd);font:13px/1.5 sans-serif" },
+    element("h3", { style: "margin:0 0 8px" }, "Publish to POM's Chat"),
+    textNodes.length === 0
+      ? element("p", {}, "This workflow has no text node to receive the prompt.")
+      : element("div", {},
+          element("label", {}, "Name", name),
+          element("label", {}, "The prompt goes to", prompt),
+          element("label", {}, "The negative prompt goes to", negative)),
+    status,
+    element("div", { style: "display:flex;gap:8px;justify-content:flex-end" },
+      element("button", { type: "button", style: "padding:6px 14px", onclick: close }, "Close"),
+      ...(textNodes.length ? [submit] : [])),
+  );
+  const overlay = element(
+    "div",
+    { style: "position:fixed;inset:0;z-index:10001;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.5)",
+      onclick: (event) => { if (event.target === overlay) close(); } },
+    box,
+  );
+  document.body.append(overlay);
+}
+
 // Offered only when this node may deploy; the node checks again on every call.
 let deployRole = { admin: false };
 try {
@@ -258,7 +317,10 @@ try {
 if (deployRole.admin) {
   app.registerExtension({
     name: "pom.deploy",
-    commands: [{ id: "pom.deploy.open", label: "Deploy on POM", icon: "pi pi-cloud-upload", function: openDeployDialog }],
-    menuCommands: [{ path: ["POM"], commands: ["pom.deploy.open"] }],
+    commands: [
+      { id: "pom.deploy.open", label: "Deploy on POM", icon: "pi pi-cloud-upload", function: openDeployDialog },
+      { id: "pom.workflow.publish", label: "Publish to Chat", icon: "pi pi-comments", function: openPublishDialog },
+    ],
+    menuCommands: [{ path: ["POM"], commands: ["pom.deploy.open", "pom.workflow.publish"] }],
   });
 }

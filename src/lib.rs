@@ -98,7 +98,8 @@ impl Plugin {
                 let deploy_id = request["deploy_id"]
                     .as_str()
                     .ok_or("deploy_id is missing")?;
-                self.supervisor.served()?.release(deploy_id);
+                let component = request["component"].as_str();
+                self.supervisor.served()?.release(deploy_id, component);
                 Ok(json!({"status": "accepted"}))
             }
             "component.upstream" => {

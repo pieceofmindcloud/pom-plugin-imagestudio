@@ -13,9 +13,15 @@ const LIST_FILE: &str = "served-components.json";
 /// Read by ComfyUI's POM nodes (`runtime/pom_components.py`).
 pub const COMFY_FILE: &str = "pom-served.json";
 
+/// Written by ComfyUI's POM nodes: calls being served per `<deploy_id>/<component>`.
+const IN_FLIGHT_FILE: &str = "pom-inflight.json";
+/// Workflows an admin published for the Chat (`runtime/pom_workflows.py`).
+const WORKFLOWS_DIR: &str = "user/pom-workflows";
+
 pub struct Served {
     list: PathBuf,
     comfy: PathBuf,
+    home: PathBuf,
     items: Mutex<Vec<Value>>,
 }
 
@@ -40,6 +46,7 @@ impl Served {
         Self {
             list,
             comfy: home.join(COMFY_FILE),
+            home: home.to_path_buf(),
             items: Mutex::new(items),
         }
     }
@@ -109,9 +116,12 @@ impl Served {
         Ok(())
     }
 
-    pub fn release(&self, deploy_id: &str) {
+    /// Stop serving a deployment: one component of it, or all of them.
+    pub fn release(&self, deploy_id: &str, component: Option<&str>) {
         let mut items = self.items.lock().unwrap();
-        items.retain(|item| item["deploy_id"] != deploy_id);
+        items.retain(|item| {
+            item["deploy_id"] != deploy_id || component.is_some_and(|c| item["component"] != c)
+        });
         self.save(&items);
     }
 
@@ -123,6 +133,50 @@ impl Served {
             .any(|item| item["deploy_id"] == deploy_id && item["component"] == component)
     }
 
+    /// The Chat's workflows here: a built-in text to image for each
+    /// deployment this machine serves a part of, and the published ones.
+    pub fn workflows(&self) -> Vec<Value> {
+        let mut list: Vec<Value> = Vec::new();
+        for item in self.items.lock().unwrap().iter() {
+            let Some(deploy_id) = item["deploy_id"].as_str() else {
+                continue;
+            };
+            let id = format!("builtin:{deploy_id}");
+            if list.iter().any(|w| w["id"] == id.as_str()) {
+                continue;
+            }
+            list.push(json!({
+                "id": id, "name": item["name"], "deploy_id": deploy_id,
+                "inputs": ["prompt", "negative", "width", "height", "seed"],
+            }));
+        }
+        let mut published: Vec<PathBuf> = fs::read_dir(self.home.join(WORKFLOWS_DIR))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|e| e == "json"))
+            .collect();
+        published.sort();
+        for path in published.into_iter().take(24) {
+            let Some(record) = fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            else {
+                continue;
+            };
+            if record["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("pub:"))
+            {
+                list.push(json!({
+                    "id": record["id"], "name": record["name"], "inputs": record["inputs"],
+                }));
+            }
+        }
+        list
+    }
+
     /// The `image` service for `host.services`: file names, never paths.
     pub fn service(&self, phase: &str, detail: &str) -> Value {
         let status = match phase {
@@ -130,6 +184,10 @@ impl Served {
             "error" => "error",
             _ => "loading",
         };
+        let in_flight: Value = fs::read(self.home.join(IN_FLIGHT_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or(Value::Null);
         let components: Vec<Value> = self
             .items
             .lock()
@@ -147,12 +205,19 @@ impl Served {
                             .map(|n| n.to_string_lossy().into_owned())
                     })
                     .collect();
+                let key = format!(
+                    "{}/{}",
+                    item["deploy_id"].as_str().unwrap_or_default(),
+                    item["component"].as_str().unwrap_or_default()
+                );
                 json!({
                     "deploy_id": item["deploy_id"], "name": item["name"],
                     "component": item["component"], "files": files, "status": status,
+                    "in_flight": in_flight.get(&key).and_then(Value::as_u64).unwrap_or(0),
                 })
             })
             .collect();
+        let workflows = self.workflows();
         let service_status = match phase {
             "ready" | "error" | "installing" | "waiting" => phase,
             _ => "starting",
@@ -160,6 +225,7 @@ impl Served {
         let mut service = json!({
             "id": "comfyui-image", "kind": "image", "name": "ComfyUI",
             "status": service_status, "components": components,
+            "workflows": workflows,
         });
         if !detail.is_empty() {
             service["detail"] = json!(detail);
@@ -200,6 +266,58 @@ mod tests {
             "deploy_id": deploy_id, "name": "Z-Image", "component": component,
             "paths": [path], "plugin_code": "comfyui", "options": {}
         })
+    }
+
+    #[test]
+    fn the_service_lists_in_flight_and_workflows() {
+        let (_root, state, home, model) = dirs();
+        let served = Served::new(&state, &home);
+        served
+            .serve(&assignment("img-1", "vae", &model), true)
+            .unwrap();
+        served
+            .serve(&assignment("img-1", "diffusion", &model), true)
+            .unwrap();
+        std::fs::write(home.join(IN_FLIGHT_FILE), r#"{"img-1/vae": 2}"#).unwrap();
+        std::fs::create_dir_all(home.join(WORKFLOWS_DIR)).unwrap();
+        std::fs::write(
+            home.join(WORKFLOWS_DIR).join("sketch.json"),
+            r#"{"id": "pub:sketch", "name": "Sketch", "inputs": ["prompt"], "graph": {}}"#,
+        )
+        .unwrap();
+        let service = served.service("ready", "");
+        let parts = service["components"].as_array().unwrap();
+        let vae = parts.iter().find(|c| c["component"] == "vae").unwrap();
+        assert_eq!(vae["in_flight"], 2);
+        let diffusion = parts
+            .iter()
+            .find(|c| c["component"] == "diffusion")
+            .unwrap();
+        assert_eq!(diffusion["in_flight"], 0);
+        let workflows = service["workflows"].as_array().unwrap();
+        assert_eq!(
+            workflows.len(),
+            2,
+            "one built-in per deployment, then the published"
+        );
+        assert_eq!(workflows[0]["id"], "builtin:img-1");
+        assert_eq!(workflows[1]["id"], "pub:sketch");
+        assert!(workflows[1].get("graph").is_none(), "the graph stays here");
+    }
+
+    #[test]
+    fn release_of_one_component_keeps_the_others() {
+        let (_root, state, home, model) = dirs();
+        let served = Served::new(&state, &home);
+        served
+            .serve(&assignment("img-1", "vae", &model), true)
+            .unwrap();
+        served
+            .serve(&assignment("img-1", "text_encoder", &model), true)
+            .unwrap();
+        served.release("img-1", Some("vae"));
+        assert!(!served.serves("img-1", "vae"));
+        assert!(served.serves("img-1", "text_encoder"));
     }
 
     #[test]
@@ -267,7 +385,7 @@ mod tests {
         served
             .serve(&assignment("img-2", "vae", &model), true)
             .unwrap();
-        served.release("img-1");
+        served.release("img-1", None);
         let components = served.service("ready", "")["components"].clone();
         assert_eq!(components.as_array().unwrap().len(), 1);
         assert_eq!(components[0]["deploy_id"], "img-2");
@@ -297,7 +415,7 @@ mod tests {
         assert_eq!(written[0]["deploy_id"], "img-1");
         assert_eq!(written[0]["component"], "vae");
         assert_eq!(written[0]["paths"][0], json!(model));
-        served.release("img-1");
+        served.release("img-1", None);
         let written: Value =
             serde_json::from_slice(&std::fs::read(home.join("pom-served.json")).unwrap()).unwrap();
         assert_eq!(written, json!([]));
