@@ -110,6 +110,35 @@ _jobs_lock = threading.Lock()
 _pending_prompt = threading.local()
 
 
+def prompt_text_of(graph):
+    """The prompt of a queued graph: the first text node fed to a sampler's
+    `positive` input, else the first text node. Empty when there is none."""
+    if not isinstance(graph, dict):
+        return ""
+    texts = {node_id: node.get("inputs", {}).get("text") for node_id, node in graph.items()
+             if isinstance(node, dict) and isinstance(node.get("inputs", {}).get("text"), str)}
+    for node in graph.values():
+        positive = node.get("inputs", {}).get("positive") if isinstance(node, dict) else None
+        if isinstance(positive, list) and positive and str(positive[0]) in texts:
+            return texts[str(positive[0])]
+    return next(iter(texts.values()), "")
+
+
+def _running_prompt_text(job):
+    """The prompt of the running prompt `job`, read from ComfyUI's queue: the
+    loaders usually call the network before the text encoder runs."""
+    try:
+        from server import PromptServer
+
+        queue = PromptServer.instance.prompt_queue
+        for item in list(queue.currently_running.values()):
+            if len(item) > 2 and str(item[1]) == str(job):
+                return prompt_text_of(item[2])
+    except Exception:
+        pass
+    return ""
+
+
 def forget_jobs():
     with _jobs_lock:
         _jobs.clear()
@@ -133,7 +162,7 @@ def _begin_job(job, target):
         _jobs[job] = {"images": 0, "width": None, "height": None, "steps": 0}
     payload = {
         "job_id": str(job),
-        "prompt": getattr(_pending_prompt, "text", "") or "",
+        "prompt": getattr(_pending_prompt, "text", "") or _running_prompt_text(job),
         "model": target.get("name", ""),
         "details": {"images": 1},
     }

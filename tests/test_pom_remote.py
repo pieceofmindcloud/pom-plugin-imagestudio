@@ -173,6 +173,17 @@ class Remote(unittest.TestCase):
         self.server = sys.modules["server"].PromptServer.instance
         self.server.last_prompt_id = None
 
+    def test_the_prompt_is_read_from_the_graph_before_the_encoder_runs(self):
+        graph = {
+            "4": {"class_type": "CLIPTextEncode", "inputs": {"text": "a red fox"}},
+            "5": {"class_type": "CLIPTextEncode", "inputs": {"text": "blurry"}},
+            "7": {"class_type": "KSampler", "inputs": {"positive": ["4", 0], "negative": ["5", 0]}},
+        }
+        self.assertEqual(pom_remote.prompt_text_of(graph), "a red fox")
+        graph["7"]["inputs"]["positive"] = ["5", 0]
+        self.assertEqual(pom_remote.prompt_text_of(graph), "blurry")
+        self.assertEqual(pom_remote.prompt_text_of({"1": {"inputs": {"seed": 1}}}), "")
+
     def test_network_components_are_listed_after_local_files(self):
         import folder_paths
 
