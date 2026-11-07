@@ -161,13 +161,15 @@ class IdleUnload:
 _idle = IdleUnload()
 
 
-def _unload_gpu():
+def _unload_gpu(reason="after a minute idle"):
+    """Moves every model off the GPU (to RAM), after the op running now: the
+    lock is the one every op holds, so a generation pauses between two ops."""
     import comfy.model_management as mm
 
     with _gpu_lock:
         mm.unload_all_models()
         mm.soft_empty_cache()
-    print("[POM] network models moved off the GPU after a minute idle")
+    print(f"[POM] network models moved off the GPU {reason}")
 
 
 def _watch_idle():
@@ -365,6 +367,12 @@ def register(home):
         pass
     threading.Thread(target=_watch_idle, name="pom-idle-unload", daemon=True).start()
     routes = PromptServer.instance.routes
+
+    @routes.post("/pom/gpu/yield")
+    async def gpu_yield(request):
+        """POM's GPU arbiter: an LLM on the same card is loading again."""
+        await asyncio.get_running_loop().run_in_executor(None, _unload_gpu, "for an LLM on the same GPU")
+        return web.json_response({"ok": True})
 
     @routes.post("/pom/component/{deploy_id}/{component}/{op}")
     async def component(request):

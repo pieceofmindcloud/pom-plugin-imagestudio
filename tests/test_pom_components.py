@@ -110,5 +110,27 @@ class Served(unittest.TestCase):
         self.assertIs(pom_components._lock_for(("img-1", "vae")), pom_components._lock_for(("img-2", "diffusion")))
 
 
+class GpuYield(unittest.TestCase):
+    def test_yield_unloads_under_the_gpu_lock(self):
+        calls = []
+        mm = types.ModuleType("comfy.model_management")
+        mm.unload_all_models = lambda: calls.append(("unload", pom_components._gpu_lock.locked()))
+        mm.soft_empty_cache = lambda: calls.append(("empty", pom_components._gpu_lock.locked()))
+        comfy = types.ModuleType("comfy")
+        comfy.model_management = mm
+        saved = {k: sys.modules.get(k) for k in ("comfy", "comfy.model_management")}
+        sys.modules["comfy"], sys.modules["comfy.model_management"] = comfy, mm
+        try:
+            pom_components._unload_gpu("for an LLM on the same GPU")
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    sys.modules.pop(key, None)
+                else:
+                    sys.modules[key] = value
+        self.assertEqual(calls, [("unload", True), ("empty", True)])
+        self.assertFalse(pom_components._gpu_lock.locked())
+
+
 if __name__ == "__main__":
     unittest.main()
