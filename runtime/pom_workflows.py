@@ -38,7 +38,10 @@ FAMILIES = {
 }
 DEFAULT = {"steps": 20, "cfg": 5.0, "sampler": "euler", "scheduler": "normal",
            "width": 1024, "height": 1024, "clip_type": "stable_diffusion", "latent": "EmptyLatentImage"}
-BUILTIN_INPUTS = ["prompt", "negative", "width", "height", "seed"]
+BUILTIN_INPUTS = ["prompt", "negative", "width", "height", "seed", "image"]
+# How far image to image moves away from the base image (1 ignores it).
+DEFAULT_STRENGTH = 0.6
+MAX_BASE_IMAGE = 16 * 1024 * 1024
 
 
 def family_of(names):
@@ -89,11 +92,74 @@ def builtin(deploy_id, entries):
 BUILTIN_MAP = {"prompt": "4", "negative": "5"}
 
 
+def with_base_image(graph):
+    """The built-in graph turned into image to image: the base image is
+    loaded (node 10), scaled to about one megapixel in steps the latent
+    accepts (11) and encoded by the deployment's VAE (12); the sampler starts
+    from it instead of an empty latent."""
+    graph = json.loads(json.dumps(graph))
+    graph.pop("6", None)
+    graph["10"] = {"class_type": "LoadImage", "inputs": {"image": ""}}
+    graph["11"] = {"class_type": "ImageScaleToTotalPixels", "inputs": {
+        "image": ["10", 0], "upscale_method": "lanczos", "megapixels": 1.0, "resolution_steps": 16}}
+    graph["12"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["11", 0], "vae": ["3", 0]}}
+    graph["7"]["inputs"]["latent_image"] = ["12", 0]
+    graph["7"]["inputs"]["denoise"] = DEFAULT_STRENGTH
+    return graph
+
+
+BUILTIN_IMAGE_MAP = {**BUILTIN_MAP, "image": "10"}
+
+
+def base_image_bytes(data):
+    """The bytes of a base image sent as base64 (a data URL or plain), and its
+    extension; only PNG and JPEG, at most 16 MiB."""
+    if not isinstance(data, str) or not data:
+        raise ValueError("the base image is empty")
+    if data.startswith("data:"):
+        data = data.split(",", 1)[-1]
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except ValueError:
+        raise ValueError("the base image is not valid base64") from None
+    if len(raw) > MAX_BASE_IMAGE:
+        raise ValueError("the base image is larger than 16 MiB")
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return raw, "png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return raw, "jpg"
+    raise ValueError("the base image must be PNG or JPEG")
+
+
+def save_base_image(data, input_dir):
+    """Writes the base image under ComfyUI's input folder as
+    `pom-chat/<sha256>.<ext>` and answers that name (what LoadImage takes)."""
+    import hashlib
+
+    raw, ext = base_image_bytes(data)
+    name = f"pom-chat/{hashlib.sha256(raw).hexdigest()}.{ext}"
+    path = os.path.join(input_dir, name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if not os.path.exists(path):
+        with open(path + ".part", "wb") as handle:
+            handle.write(raw)
+        os.replace(path + ".part", path)
+    return name
+
+
 def substitute(graph, inputs_map, values):
     """A copy of `graph` with the Chat's values set: the prompt (and negative)
     text, the size and batch on latent nodes, the seed on samplers (random
     when not given)."""
     graph = json.loads(json.dumps(graph))
+    image_node = inputs_map.get("image")
+    if image_node and image_node in graph and values.get("image_name"):
+        graph[image_node]["inputs"]["image"] = values["image_name"]
+    strength = values.get("strength")
+    if strength is not None:
+        for node in graph.values():
+            if node.get("class_type") == "KSampler" and "denoise" in node.get("inputs", {}):
+                node["inputs"]["denoise"] = max(0.05, min(float(strength), 1.0))
     for key in ("prompt", "negative"):
         node = inputs_map.get(key)
         if node and node in graph:
@@ -136,12 +202,15 @@ def publish(home, name, graph, inputs):
     negative = (inputs or {}).get("negative")
     if negative and (negative not in graph or "text" not in graph[negative].get("inputs", {})):
         raise ValueError("the negative prompt node is not a text node")
+    image = (inputs or {}).get("image")
+    if image and (image not in graph or "image" not in graph[image].get("inputs", {})):
+        raise ValueError("the base image node is not an image loader")
     workflow_id = "pub:" + slug(name)
     folder = os.path.join(home, WORKFLOWS_DIR)
     os.makedirs(folder, exist_ok=True)
-    listed = ["prompt"] + (["negative"] if negative else [])
-    record = {"id": workflow_id, "name": name, "inputs": listed,
-              "map": {"prompt": prompt, **({"negative": negative} if negative else {})}, "graph": graph}
+    listed = ["prompt"] + (["negative"] if negative else []) + (["image"] if image else [])
+    mapped = {"prompt": prompt, **({"negative": negative} if negative else {}), **({"image": image} if image else {})}
+    record = {"id": workflow_id, "name": name, "inputs": listed, "map": mapped, "graph": graph}
     path = os.path.join(folder, workflow_id[4:] + ".json")
     with open(path + ".part", "w") as handle:
         json.dump(record, handle)
@@ -167,16 +236,23 @@ def published(home):
     return found
 
 
-def resolve(home, workflow_id, entries):
-    """(graph, inputs map) of a workflow id, or raises ValueError."""
+def resolve(home, workflow_id, entries, base_image=False):
+    """(graph, inputs map) of a workflow id, or raises ValueError. With a base
+    image the built-in one becomes image to image, and a published one must
+    have a node that takes it."""
     if workflow_id.startswith("builtin:"):
         graph = builtin(workflow_id[len("builtin:"):], entries)
         if graph is None:
             raise ValueError("this deployment is missing a stage on the network")
+        if base_image:
+            return with_base_image(graph), BUILTIN_IMAGE_MAP
         return graph, BUILTIN_MAP
     for record in published(home):
         if record.get("id") == workflow_id:
-            return record["graph"], record.get("map", {})
+            mapped = record.get("map", {})
+            if base_image and "image" not in mapped:
+                raise ValueError("this workflow takes no base image")
+            return record["graph"], mapped
     raise ValueError("no such workflow on this machine")
 
 
@@ -259,10 +335,17 @@ def register(home):
         loop = asyncio.get_running_loop()
         try:
             entries = await loop.run_in_executor(None, remote.network_components)
-            graph, inputs_map = resolve(home, str(body.get("workflow_id", "")), entries)
+            has_image = bool(body.get("image"))
+            graph, inputs_map = resolve(home, str(body.get("workflow_id", "")), entries, base_image=has_image)
+            values = dict(body)
+            if has_image:
+                import folder_paths
+
+                values["image_name"] = save_base_image(body["image"], folder_paths.get_input_directory())
+                values.setdefault("strength", DEFAULT_STRENGTH)
         except ValueError as error:
-            return web.json_response({"error": str(error)}, status=404)
-        graph = substitute(graph, inputs_map, body)
+            return web.json_response({"error": str(error)}, status=400)
+        graph = substitute(graph, inputs_map, values)
 
         response = web.StreamResponse(headers={"content-type": "application/x-ndjson"})
         await response.prepare(request)

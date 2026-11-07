@@ -162,7 +162,7 @@ impl Served {
             }
             list.push(json!({
                 "id": id, "name": item["name"], "deploy_id": deploy_id,
-                "inputs": ["prompt", "negative", "width", "height", "seed"],
+                "inputs": ["prompt", "negative", "width", "height", "seed", "image"],
             }));
         }
         let mut published: Vec<PathBuf> = fs::read_dir(self.home.join(WORKFLOWS_DIR))

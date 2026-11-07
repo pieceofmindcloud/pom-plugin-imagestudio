@@ -254,11 +254,13 @@ async function openPublishDialog() {
     "border:1px solid var(--border-color,#444);background:var(--comfy-input-bg,#111);color:inherit";
   const { output } = await app.graphToPrompt();
   const textNodes = Object.entries(output || {}).filter(([, node]) => typeof node?.inputs?.text === "string");
+  const imageNodes = Object.entries(output || {}).filter(([, node]) => node?.class_type === "LoadImage");
   const status = element("p", { style: "min-height:1.2em;margin:6px 0;color:var(--error-text,#f88)" });
   const name = element("input", { style: field, placeholder: "What this workflow makes" });
   const option = ([id, node]) => element("option", { value: id }, `#${id} ${node._meta?.title || node.class_type}`);
   const prompt = element("select", { style: field }, ...textNodes.map(option));
   const negative = element("select", { style: field }, element("option", { value: "" }, "None"), ...textNodes.map(option));
+  const image = element("select", { style: field }, element("option", { value: "" }, "None"), ...imageNodes.map(option));
   const close = () => overlay.remove();
   const submit = element("button", { type: "button", style: "padding:6px 14px", onclick: async () => {
     status.textContent = "";
@@ -268,7 +270,8 @@ async function openPublishDialog() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name: name.value.trim(), graph: output,
-          inputs: { prompt: prompt.value, ...(negative.value ? { negative: negative.value } : {}) } }),
+          inputs: { prompt: prompt.value, ...(negative.value ? { negative: negative.value } : {}),
+            ...(image.value ? { image: image.value } : {}) } }),
       });
       const answer = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(answer.error || `HTTP ${response.status}`);
@@ -291,7 +294,8 @@ async function openPublishDialog() {
       : element("div", {},
           element("label", {}, "Name", name),
           element("label", {}, "The prompt goes to", prompt),
-          element("label", {}, "The negative prompt goes to", negative)),
+          element("label", {}, "The negative prompt goes to", negative),
+          ...(imageNodes.length ? [element("label", {}, "An image sent in the Chat goes to", image)] : [])),
     status,
     element("div", { style: "display:flex;gap:8px;justify-content:flex-end" },
       element("button", { type: "button", style: "padding:6px 14px", onclick: close }, "Close"),
