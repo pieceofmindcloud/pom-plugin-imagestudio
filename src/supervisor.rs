@@ -226,8 +226,10 @@ impl Supervisor {
         };
         // The installation (source, Python, packages) lives in `runtime/`,
         // which a machine with several nodes may share between them (one
-        // bind mount); this node's opt-in and state stay in `base`.
-        let runtime = base.join(RUNTIME);
+        // bind mount); this node's opt-in and state stay in `base`. One
+        // installation per PyTorch build: nodes of one machine may have
+        // NVIDIA and AMD cards.
+        let runtime = base.join(RUNTIME).join(backend);
         fs::create_dir_all(&runtime).map_err(|_| "Cannot create ComfyUI runtime directory")?;
         let mode = match installer::install_mode(&runtime, backend) {
             InstallMode::Fresh => Some("install"),
@@ -524,6 +526,14 @@ fn remove_legacy_install(base: &Path) {
         let _ = fs::remove_dir_all(base.join(name));
     }
     let _ = fs::remove_file(base.join("source.tar.gz"));
+    // The first shared release kept one installation straight in `runtime/`.
+    let runtime = base.join(RUNTIME);
+    for name in ["venv", "source", "source.partial", "bootstrap"] {
+        let _ = fs::remove_dir_all(runtime.join(name));
+    }
+    for name in [".installed", "source.tar.gz"] {
+        let _ = fs::remove_file(runtime.join(name));
+    }
 }
 
 /// Whether the install log ends on the disk running out of space (only the

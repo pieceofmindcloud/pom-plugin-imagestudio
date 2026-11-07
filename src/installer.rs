@@ -45,19 +45,37 @@ fn uv_artifact() -> Result<Artifact, String> {
 
 /// The PyTorch build for this machine, as `uv pip --torch-backend` names it.
 /// NVIDIA wins over AMD on a machine with both (CUDA is ComfyUI's main path).
+/// On Linux a card counts only when its device is here: in a container,
+/// `/proc/driver/nvidia` shows the host's driver even when no NVIDIA card was
+/// passed in.
 pub fn torch_backend() -> &'static str {
     let exists = |path: &str| Path::new(path).exists();
     match std::env::consts::OS {
         "macos" => "auto",
-        "linux" if exists("/proc/driver/nvidia/version") || exists("/dev/nvidiactl") => {
-            cuda_backend(nvidia_driver().as_deref())
-        }
-        "linux" if exists("/dev/kfd") => "rocm6.4",
+        "linux" if nvidia_card(Path::new("/dev")) => cuda_backend(nvidia_driver().as_deref()),
+        "linux" if exists("/dev/kfd") => ROCM,
         "windows" if exists(r"C:\Windows\System32\nvidia-smi.exe") => {
             cuda_backend(nvidia_driver().as_deref())
         }
         _ => "cpu",
     }
+}
+
+/// The PyTorch ROCm build: its wheels carry the ROCm libraries, so the
+/// machine only needs the kernel driver (`/dev/kfd`). `rocm6.4` stopped at
+/// PyTorch 2.9.
+const ROCM: &str = "rocm7.2";
+
+/// An NVIDIA card device (`/dev/nvidia0`, ...) in `dev`.
+fn nvidia_card(dev: &Path) -> bool {
+    fs::read_dir(dev).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.strip_prefix("nvidia")
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+    })
 }
 
 /// ComfyUI needs a `cu130` PyTorch for its optimized CUDA kernels (comfy-kitchen:
@@ -497,7 +515,21 @@ mod tests {
 
     #[test]
     fn torch_backend_is_one_uv_knows() {
-        assert!(["auto", "cu130", "cu128", "rocm6.4", "cpu"].contains(&torch_backend()));
+        assert!(["auto", "cu130", "cu128", ROCM, "cpu"].contains(&torch_backend()));
+    }
+
+    #[test]
+    fn only_a_card_device_means_nvidia() {
+        let dev = std::env::temp_dir().join(format!("pom-comfyui-dev-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dev);
+        fs::create_dir_all(&dev).unwrap();
+        fs::write(dev.join("kfd"), "").unwrap();
+        fs::write(dev.join("nvidia-modeset"), "").unwrap();
+        fs::write(dev.join("nvidiactl"), "").unwrap();
+        assert!(!nvidia_card(&dev), "control devices without a card");
+        fs::write(dev.join("nvidia0"), "").unwrap();
+        assert!(nvidia_card(&dev));
+        fs::remove_dir_all(&dev).unwrap();
     }
 
     #[test]
