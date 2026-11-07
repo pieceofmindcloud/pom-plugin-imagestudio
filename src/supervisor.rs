@@ -139,7 +139,7 @@ impl Supervisor {
         *served = Some(Arc::clone(&created));
         Ok(created)
     }
-    /// Whether ComfyUI was installed on this machine (the screen's opt-in).
+    /// Whether ComfyUI was installed on this node (the screen's opt-in; the runtime itself may be shared).
     pub fn installed(&self) -> bool {
         plugin_directory()
             .map(|base| base.join(".installed").exists())
@@ -224,7 +224,12 @@ impl Supervisor {
         } else {
             installer::torch_backend()
         };
-        let mode = match installer::install_mode(&base, backend) {
+        // The installation (source, Python, packages) lives in `runtime/`,
+        // which a machine with several nodes may share between them (one
+        // bind mount); this node's opt-in and state stay in `base`.
+        let runtime = base.join(RUNTIME);
+        fs::create_dir_all(&runtime).map_err(|_| "Cannot create ComfyUI runtime directory")?;
+        let mode = match installer::install_mode(&runtime, backend) {
             InstallMode::Fresh => Some("install"),
             InstallMode::Update => Some("update"),
             InstallMode::Installed => None,
@@ -242,12 +247,21 @@ impl Supervisor {
             status.step = Some((step, since, measured));
             status.mode = Some(mode);
         };
+        let lock = if mode.is_some() {
+            Some(self.lock_runtime(&runtime)?)
+        } else {
+            None
+        };
         let (python, source) = installer::ensure(
-            &base,
+            &runtime,
             backend,
             |command| self.run_install_step(command, &base),
             &report,
         )?;
+        drop(lock);
+        fs::write(base.join(".installed"), installer::VERSION)
+            .map_err(|_| "Cannot mark ComfyUI installation")?;
+        remove_legacy_install(&base);
         install_pom_nodes(&home)?;
         self.set("starting", "Starting ComfyUI");
 
@@ -325,6 +339,35 @@ impl Supervisor {
         }
         Ok(())
     }
+    /// Another node sharing `runtime` may be installing it: wait for it, and
+    /// `ensure` then finds the installation done.
+    fn lock_runtime(&self, runtime: &Path) -> Result<fs::File, String> {
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(runtime.join(".install.lock"))
+            .map_err(|_| "Cannot lock the ComfyUI runtime")?;
+        let mut told = false;
+        loop {
+            match lock.try_lock() {
+                Ok(()) => return Ok(lock),
+                Err(fs::TryLockError::WouldBlock) => {
+                    if !told {
+                        self.set(
+                            "installing",
+                            "Another POM node on this machine is installing ComfyUI; waiting for it",
+                        );
+                        told = true;
+                    }
+                    thread::sleep(Duration::from_secs(1));
+                }
+                Err(fs::TryLockError::Error(_)) => {
+                    return Err("Cannot lock the ComfyUI runtime".into())
+                }
+            }
+        }
+    }
     fn run_install_step(&self, mut command: Command, base: &Path) -> Result<(), String> {
         let log = fs::OpenOptions::new()
             .create(true)
@@ -372,6 +415,8 @@ impl Supervisor {
             if let Some(exit) = outcome {
                 return if exit.success() {
                     Ok(())
+                } else if disk_full(&base.join("install.log")) {
+                    Err("ComfyUI installation failed: the disk is full; free some space and install again".into())
                 } else {
                     Err("ComfyUI installation failed; see install.log".into())
                 };
@@ -469,6 +514,32 @@ pub(crate) fn install_pom_nodes(home: &Path) -> Result<(), String> {
     fs::write(directory.join("remote.py"), POM_REMOTE).map_err(failed)
 }
 
+/// The installation's folder inside the plugin's directory.
+const RUNTIME: &str = "runtime";
+
+/// Releases before the shared runtime installed straight into the plugin's
+/// directory; once `runtime/` works, those copies are only taking space.
+fn remove_legacy_install(base: &Path) {
+    for name in ["venv", "source", "source.partial", "bootstrap"] {
+        let _ = fs::remove_dir_all(base.join(name));
+    }
+    let _ = fs::remove_file(base.join("source.tar.gz"));
+}
+
+/// Whether the install log ends on the disk running out of space (only the
+/// tail is read: the log grows across attempts).
+fn disk_full(log: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = fs::File::open(log) else {
+        return false;
+    };
+    let length = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let _ = file.seek(SeekFrom::Start(length.saturating_sub(4096)));
+    let mut tail = Vec::new();
+    let _ = file.read_to_end(&mut tail);
+    String::from_utf8_lossy(&tail).contains("No space left on device")
+}
+
 fn private_directory(path: &Path) -> Result<(), String> {
     #[cfg(not(unix))]
     let _ = path;
@@ -485,6 +556,23 @@ fn private_directory(path: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
     const SECOND: Duration = Duration::from_secs(1);
+
+    #[test]
+    fn a_full_disk_is_told_apart_in_the_install_log() {
+        let dir = std::env::temp_dir().join(format!("pom-comfyui-disk-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("install.log");
+        assert!(!disk_full(&log), "no log");
+        fs::write(&log, "x".repeat(10_000) + "\nerror: Failed to install\n").unwrap();
+        assert!(!disk_full(&log));
+        fs::write(
+            &log,
+            "x".repeat(10_000) + "\n  cause: No space left on device (os error 28)\n",
+        )
+        .unwrap();
+        assert!(disk_full(&log));
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn an_unmeasured_step_never_reaches_its_end() {

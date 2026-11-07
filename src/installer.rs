@@ -453,6 +453,9 @@ pub fn ensure(
 
     fs::write(&marker, stamp(backend)).map_err(|_| "Cannot mark ComfyUI installation")?;
     let _ = fs::remove_file(source_archive);
+    // The download cache is several GB and only speeds up a retry; an update
+    // downloads what it needs again.
+    let _ = fs::remove_dir_all(boot.join("cache"));
     Ok((python, source))
 }
 
