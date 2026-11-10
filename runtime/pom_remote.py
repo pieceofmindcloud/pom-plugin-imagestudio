@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (c) 2026 The POM authors. Runs inside ComfyUI; see runtime/LICENSE.
 """Image model components served on the POM network, in ComfyUI's ordinary
 loader nodes.
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (c) 2026 The POM authors. Runs inside ComfyUI; see runtime/LICENSE.
 """POM nodes for ComfyUI: use the models the POM cluster serves.
 
 Installed by the POM ComfyUI plugin into `custom_nodes/pom_nodes`, and

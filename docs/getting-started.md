@@ -1,6 +1,6 @@
-# ComfyUI
+# Image Studio (runs ComfyUI)
 
-Open **ComfyUI** in the POM sidebar. On the first visit the installation starts by itself, behind POM's installer: a progress bar and a line saying what is happening (downloading ComfyUI, the installer, the Python runtime, then PyTorch and ComfyUI's packages). It downloads several gigabytes from GitHub, PyPI and the PyTorch index, and needs nothing on the host beforehand: no Python, pip, git or curl. When it finishes ComfyUI opens edge to edge. If it fails, the error is shown with **Try again**. Later visits open ComfyUI directly.
+Open **Image Studio** in the POM sidebar. On the first visit the installation starts by itself, behind POM's installer: a progress bar and a line saying what is happening (downloading ComfyUI, the installer, the Python runtime, then PyTorch and ComfyUI's packages). It downloads several gigabytes from GitHub, PyPI and the PyTorch index, and needs nothing on the host beforehand: no Python, pip, git or curl. When it finishes ComfyUI opens edge to edge. If it fails, the error is shown with **Try again**. Later visits open ComfyUI directly.
 
 ## Which PyTorch
 

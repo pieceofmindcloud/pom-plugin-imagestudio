@@ -1,4 +1,4 @@
-# ComfyUI for POM
+# POM Image Studio (runs ComfyUI)
 
 A POM plugin (`plugin_code: comfyui`) that runs [ComfyUI](https://github.com/comfy-org/ComfyUI)
 inside POM, on demand, behind POM's plugin proxy, with nodes that call the
@@ -43,3 +43,12 @@ the user's files under the workspace's `.comfyui/` are kept.
 Run the **Publish plugin release** workflow with the platforms and a
 `vX.Y.Z` tag per platform. A prerelease stays on GitHub; a stable release is
 also uploaded to the license server (`POM_RELEASE_TOKEN`, `POM_RELEASE_API`).
+
+## License
+
+MIT, except the files that run inside ComfyUI (`runtime/pom_nodes.py`,
+`pom_components.py`, `pom_remote.py`, `pom_workflows.py`, `runtime/web/pom.js`),
+which are GPL-3.0-only like ComfyUI (`runtime/LICENSE`). See [`NOTICE`](NOTICE)
+for third-party software, the icon's attribution and the trademark note:
+"Comfy" and "ComfyUI" are trademarks of Comfy Org; this plugin is not
+affiliated with or endorsed by Comfy Org.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Loopback bridge between POM's plugin proxy and the ComfyUI server.
 
 ComfyUI has no authentication of its own, so it listens on a random loopback

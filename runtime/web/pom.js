@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (c) 2026 The POM authors. Runs inside ComfyUI; see runtime/LICENSE.
 // POM: ComfyUI runs on the POM node, not on the viewer's computer. The
 // missing-model "Download" button would otherwise save the file in the
 // browser; ComfyUI lets a host take that button over, so the POM nodes

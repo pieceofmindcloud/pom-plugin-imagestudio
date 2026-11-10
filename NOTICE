@@ -1,0 +1,27 @@
+POM Image Studio (pom-plugin-comfyui)
+Copyright (c) 2026 The POM authors
+
+Licensing of this repository
+- MIT (LICENSE): everything except the files listed below, including the
+  plugin library (src/), the screen (ui/) and runtime/bridge.py, which runs as
+  its own process and talks to ComfyUI over HTTP.
+- GPL-3.0-only (runtime/LICENSE): runtime/pom_nodes.py,
+  runtime/pom_components.py, runtime/pom_remote.py, runtime/pom_workflows.py
+  and runtime/web/pom.js. They are loaded into ComfyUI's own process and web
+  page as custom nodes, so they follow ComfyUI's license. The plugin writes
+  them, with that license, into ComfyUI's custom_nodes/pom_nodes/ as source.
+
+Third-party software
+- ComfyUI (https://github.com/Comfy-Org/ComfyUI), GPL-3.0. Not bundled: the
+  plugin downloads the official release pinned in src/installer.rs and runs it
+  unmodified. "Comfy" and "ComfyUI" are trademarks of Comfy Org. This plugin
+  is not affiliated with or endorsed by Comfy Org; the names are used only to
+  say which software it runs.
+- uv (https://github.com/astral-sh/uv), MIT or Apache-2.0, and PyTorch with
+  ComfyUI's Python dependencies, each under its own license, are downloaded at
+  install time and not bundled.
+
+Icon
+- ui/icon.png: "AI camera" icon from Flaticon
+  (https://www.flaticon.com/free-icon/ai_6062658), used under the Flaticon
+  license, which requires this attribution for free use.

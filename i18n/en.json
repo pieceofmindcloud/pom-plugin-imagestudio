@@ -1,6 +1,6 @@
 {
-  "main.title": "ComfyUI",
-  "main.hostTooOld": "This ComfyUI plugin needs a newer POM (plugin host version 7). Update POM to use it.",
+  "main.title": "Image Studio",
+  "main.hostTooOld": "The Image Studio plugin needs a newer POM (plugin host version 7). Update POM to use it.",
   "loader.installing": "Installing ComfyUI",
   "loader.updating": "Updating ComfyUI",
   "loader.stopped": "ComfyUI stopped",

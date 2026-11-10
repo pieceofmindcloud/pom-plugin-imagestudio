@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (c) 2026 The POM authors. Runs inside ComfyUI; see runtime/LICENSE.
 """Workflows POM's Chat runs on this machine (installed as
 `custom_nodes/pom_nodes/workflows.py`).
 
