@@ -12,8 +12,8 @@
 
 `POST /pom/workflow/run` (behind the bridge's token, called by the POM node)
 queues one in this ComfyUI, streams NDJSON progress (`{"p": n, "of": m}`) and
-ends with the images (`{"images": [{mime, width, height, data}]}`) or
-`{"error"}`. The images are base64 PNG bytes; the node keeps them.
+ends with media or `{"error"}`. `POST /pom/workflow/unpublish` removes one
+published copy from Chat; its original ComfyUI workflow is unchanged.
 """
 import base64
 import json
@@ -373,6 +373,25 @@ def published(home):
     return found
 
 
+def unpublish(home, workflow_id):
+    """Remove one exact published copy from Chat, not its ComfyUI workflow."""
+    if not isinstance(workflow_id, str) or not workflow_id.startswith("pub:"):
+        raise ValueError("choose a published workflow")
+    slug_part = workflow_id[4:]
+    if not slug_part or len(slug_part) > 48 or slug(slug_part) != slug_part:
+        raise ValueError("invalid published workflow id")
+    path = os.path.join(home, WORKFLOWS_DIR, slug_part + ".json")
+    try:
+        with open(path) as handle:
+            record = json.load(handle)
+    except FileNotFoundError:
+        return None
+    if not isinstance(record, dict) or record.get("id") != workflow_id:
+        return None
+    os.remove(path)
+    return {"id": workflow_id, "name": record.get("name", slug_part)}
+
+
 def resolve(home, workflow_id, entries, base_image=False):
     """(graph, inputs map) of a workflow id, or raises ValueError. With a base
     image the built-in one becomes image to image, and a published one must
@@ -654,6 +673,21 @@ def register(home):
         except (ValueError, AttributeError) as error:
             return web.json_response({"error": str(error)}, status=400)
         return web.json_response({"id": workflow_id})
+
+    @routes.post("/pom/workflow/unpublish")
+    async def unpublish_route(request):
+        loop = asyncio.get_running_loop()
+        role = await loop.run_in_executor(None, nodes_role)
+        if not role.get("admin"):
+            return web.json_response({"error": "only an admin of the network unpublishes workflows"}, status=403)
+        try:
+            body = await request.json()
+            result = unpublish(home, body.get("id"))
+        except (ValueError, AttributeError) as error:
+            return web.json_response({"error": str(error)}, status=400)
+        if result is None:
+            return web.json_response({"error": "published workflow not found"}, status=404)
+        return web.json_response(result)
 
     @routes.get("/pom/workflow/list")
     async def list_route(request):

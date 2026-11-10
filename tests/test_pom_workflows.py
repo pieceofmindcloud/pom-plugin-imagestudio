@@ -68,6 +68,18 @@ class WorkflowTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 pom_workflows.resolve(home, "pub:nope", [])
 
+    def test_unpublish_removes_only_the_published_copy(self):
+        with tempfile.TemporaryDirectory() as home:
+            graph = {"10": {"class_type": "CLIPTextEncode", "inputs": {"text": "x"}}}
+            workflow_id = pom_workflows.publish(home, "My Sketch!", graph, {"prompt": "10"})
+            result = pom_workflows.unpublish(home, workflow_id)
+            self.assertEqual(result, {"id": workflow_id, "name": "My Sketch!"})
+            self.assertEqual(pom_workflows.published(home), [])
+            self.assertFalse(os.path.exists(os.path.join(home, "user", "pom-workflows", "my-sketch.json")))
+            self.assertIsNone(pom_workflows.unpublish(home, workflow_id))
+            with self.assertRaises(ValueError):
+                pom_workflows.unpublish(home, "pub:../other")
+
     def test_publish_refuses_a_graph_without_the_prompt_node(self):
         with tempfile.TemporaryDirectory() as home:
             graph = {"11": {"class_type": "KSampler", "inputs": {"seed": 1}}}

@@ -373,6 +373,80 @@ async function openPublishDialog() {
   document.body.append(overlay);
 }
 
+// Remove the published copy from Chat without changing the ComfyUI graph.
+async function openUnpublishDialog() {
+  const status = element("p", { style: "min-height:1.2em;margin:6px 0;color:var(--error-text,#f88)" });
+  const list = element("div", {}, "Loading published workflows…");
+  const close = () => overlay.remove();
+  const box = element(
+    "div",
+    { role: "dialog", "aria-label": "Unpublish from Chat",
+      style: "width:min(560px,92vw);max-height:86vh;overflow:auto;padding:16px 18px;border-radius:10px;" +
+        "background:var(--comfy-menu-bg,#222);color:var(--fg-color,#ddd);font:13px/1.5 sans-serif" },
+    element("h3", { style: "margin:0 0 8px" }, "Unpublish from Chat"),
+    element("p", { style: "margin:0 0 12px;opacity:.75" },
+      "This removes the published copy from POM Chat. The original workflow stays in ComfyUI."),
+    list,
+    status,
+    element("div", { style: "display:flex;gap:8px;justify-content:flex-end" },
+      element("button", { type: "button", onclick: close }, "Close")),
+  );
+  const overlay = element(
+    "div",
+    { style: "position:fixed;inset:0;z-index:10001;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.5)",
+      onclick: (event) => { if (event.target === overlay) close(); } },
+    box,
+  );
+  document.body.append(overlay);
+
+  try {
+    const response = await api.fetchApi("/pom/workflow/list");
+    const answer = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(answer.error || `HTTP ${response.status}`);
+    const workflows = Array.isArray(answer.workflows) ? answer.workflows : [];
+    if (!workflows.length) {
+      list.replaceChildren(element("p", { style: "margin:0;opacity:.7" }, "No workflows are published to Chat."));
+      return;
+    }
+    list.replaceChildren(...workflows.map((workflow) => {
+      const button = element("button", { type: "button", onclick: async () => {
+        if (!window.confirm(`Unpublish "${workflow.name}" from POM Chat? The original ComfyUI workflow will stay unchanged.`)) return;
+        status.textContent = "";
+        button.disabled = true;
+        try {
+          const removed = await api.fetchApi("/pom/workflow/unpublish", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: workflow.id }),
+          });
+          const result = await removed.json().catch(() => ({}));
+          if (!removed.ok) throw new Error(result.error || `HTTP ${removed.status}`);
+          toast("success", "Unpublished from Chat", workflow.name);
+          row.remove();
+          if (!list.children.length) {
+            list.replaceChildren(element("p", { style: "margin:0;opacity:.7" }, "No workflows are published to Chat."));
+          }
+        } catch (error) {
+          status.textContent = error.message;
+        } finally {
+          button.disabled = false;
+        }
+      } }, "Unpublish");
+      const row = element(
+        "div",
+        { style: "display:flex;justify-content:space-between;gap:8px;align-items:center;padding:8px 0;border-top:1px solid var(--border-color,#333)" },
+        element("div", {},
+          element("strong", {}, workflow.name || workflow.id),
+          workflow.description ? element("div", { style: "opacity:.7" }, workflow.description) : document.createTextNode("")),
+        button,
+      );
+      return row;
+    }));
+  } catch (error) {
+    list.replaceChildren(element("p", { style: "margin:0" }, error.message));
+  }
+}
+
 // Offered only when this node may deploy; the node checks again on every call.
 let deployRole = { admin: false };
 try {
@@ -387,7 +461,8 @@ if (deployRole.admin) {
     commands: [
       { id: "pom.deploy.open", label: "Deploy on POM", icon: "pi pi-cloud-upload", function: openDeployDialog },
       { id: "pom.workflow.publish", label: "Publish to Chat", icon: "pi pi-comments", function: openPublishDialog },
+      { id: "pom.workflow.unpublish", label: "Unpublish from Chat", icon: "pi pi-trash", function: openUnpublishDialog },
     ],
-    menuCommands: [{ path: ["POM"], commands: ["pom.deploy.open", "pom.workflow.publish"] }],
+    menuCommands: [{ path: ["POM"], commands: ["pom.deploy.open", "pom.workflow.publish", "pom.workflow.unpublish"] }],
   });
 }

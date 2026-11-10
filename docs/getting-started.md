@@ -22,6 +22,10 @@ The **POM** category of the node library calls the models deployed on your POM c
 
 Connect their text output to a text input, such as the prompt of **CLIP Text Encode**. The model list is read from POM when ComfyUI loads; deploy a model in POM and refresh ComfyUI to see it. Change the node's seed to ask again instead of reusing the cached answer.
 
+## Chat workflows
+
+On an admin node, **POM ▸ Publish to Chat** publishes the open graph for POM Chat and its API. **POM ▸ Unpublish from Chat** lists the published copies and removes a selected one from Chat; it does not delete or change the original workflow in ComfyUI.
+
 ## Models served on the POM network
 
 An admin can deploy an image model on the network by component: the diffusion model, the text encoder and the VAE each on a machine that already holds that file and runs ComfyUI (POM's **Deploy** screen, **Image model**, or **Deploy on POM** in ComfyUI's menu on an admin node). Those machines' ComfyUI then serve their part; nobody has to keep their screen open, and a machine that restarts serves its part again by itself. Closing ComfyUI with its X on a serving machine stops what it serves there until it reopens. A serving machine gives its GPU back to POM's language models a minute after the last call; the next generation takes a few seconds more to load the part again.
