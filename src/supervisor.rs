@@ -577,6 +577,15 @@ fn private_directory(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An absolute path on this platform (Windows needs a drive).
+    fn abs(path: &str) -> String {
+        if cfg!(windows) {
+            format!("C:{path}")
+        } else {
+            path.to_owned()
+        }
+    }
     const SECOND: Duration = Duration::from_secs(1);
 
     #[test]
@@ -645,14 +654,14 @@ mod tests {
     #[test]
     fn the_bridge_gets_the_model_dirs_and_host_api() {
         let context = Context::from_configure(&json!({
-            "model_dirs": ["/models/full", "/mnt/disk2/models"],
+            "model_dirs": [abs("/models/full"), abs("/mnt/disk2/models")],
             "host_api": {"base_url": "http://127.0.0.1:8080/api/plugin-host", "token": "host-secret-token"}
         }))
         .unwrap();
         let env: std::collections::HashMap<_, _> = bridge_env(&context).into_iter().collect();
         assert_eq!(
             env["POM_MODEL_DIRS"].as_deref(),
-            Some("/models/full\n/mnt/disk2/models")
+            Some(format!("{}\n{}", abs("/models/full"), abs("/mnt/disk2/models")).as_str())
         );
         assert_eq!(
             env["POM_HOST_API_URL"].as_deref(),

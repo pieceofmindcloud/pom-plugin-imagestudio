@@ -162,12 +162,21 @@ impl Context {
 mod tests {
     use super::*;
 
+    /// An absolute path on this platform (Windows needs a drive).
+    fn abs(path: &str) -> String {
+        if cfg!(windows) {
+            format!("C:{path}")
+        } else {
+            path.to_owned()
+        }
+    }
+
     #[test]
     fn reads_every_part_of_host_configure() {
         let context = Context::from_configure(&json!({
             "operation": "host.configure",
             "gateway": {"openai_base_url": "http://127.0.0.1:8080/v1/", "api_key": "sk-x"},
-            "workspace_root": "/data/workspace",
+            "workspace_root": abs("/data/workspace"),
             "host_api": {"base_url": "http://127.0.0.1:8080/api/plugin-host", "token": "t"},
             "preferences": {"features": {"example_feature_enabled": true}, "storage_directory": null}
         }))
@@ -178,7 +187,7 @@ mod tests {
         );
         assert_eq!(
             context.workspace_root,
-            Some(PathBuf::from("/data/workspace"))
+            Some(PathBuf::from(abs("/data/workspace")))
         );
         assert!(context.host_api.is_some());
         assert!(context.feature("example_feature_enabled"));
@@ -187,14 +196,14 @@ mod tests {
     #[test]
     fn model_dirs_are_read_and_must_be_absolute() {
         let context = Context::from_configure(&json!({
-            "model_dirs": ["/models/full", "/mnt/disk2/models"]
+            "model_dirs": [abs("/models/full"), abs("/mnt/disk2/models")]
         }))
         .unwrap();
         assert_eq!(
             context.model_dirs,
             [
-                PathBuf::from("/models/full"),
-                PathBuf::from("/mnt/disk2/models")
+                PathBuf::from(abs("/models/full")),
+                PathBuf::from(abs("/mnt/disk2/models"))
             ]
         );
         assert!(Context::from_configure(&json!({}))
@@ -203,8 +212,8 @@ mod tests {
             .is_empty());
         assert!(Context::from_configure(&json!({"model_dirs": ["models"]})).is_err());
         assert!(Context::from_configure(&json!({"model_dirs": "/models"})).is_err());
-        let a = Context::from_configure(&json!({"model_dirs": ["/a"]})).unwrap();
-        let b = Context::from_configure(&json!({"model_dirs": ["/b"]})).unwrap();
+        let a = Context::from_configure(&json!({"model_dirs": [abs("/a")]})).unwrap();
+        let b = Context::from_configure(&json!({"model_dirs": [abs("/b")]})).unwrap();
         assert!(a.launch_identity() != b.launch_identity());
     }
 
