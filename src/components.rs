@@ -117,10 +117,11 @@ impl Served {
 
     /// Serve one component; idempotent (the same component of the same
     /// deployment replaces the earlier one).
+    /// Registers a component a deployment assigns to this machine. ComfyUI need
+    /// not be installed or running yet: the caller starts it right after, and
+    /// the first start installs it (`installed` only tells the log which).
     pub fn serve(&self, assignment: &Value, installed: bool) -> Result<(), String> {
-        if !installed {
-            return Err("Open ComfyUI once on this machine to install it".into());
-        }
+        let _ = installed;
         let deploy_id = assignment["deploy_id"].as_str().filter(|s| !s.is_empty());
         let component = assignment["component"].as_str().unwrap_or_default();
         let Some(deploy_id) = deploy_id else {
@@ -400,13 +401,15 @@ mod tests {
     }
 
     #[test]
-    fn serving_requires_an_installed_comfyui() {
+    fn serving_accepts_a_machine_that_never_opened_comfyui() {
         let (_root, state, home, model) = dirs();
         let served = Served::new(&state, &home);
-        let error = served
+        // the deploy itself starts (and on the first time installs) ComfyUI
+        served
             .serve(&assignment("img-1", "vae", &model), false)
-            .unwrap_err();
-        assert!(error.contains("Open ComfyUI once"), "{error}");
+            .unwrap();
+        assert!(served.serves("img-1", "vae"));
+        served.release("img-1", Some("vae"));
         let error = served
             .serve(&assignment("img-1", "unet", &model), true)
             .unwrap_err();
