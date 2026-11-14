@@ -47,7 +47,9 @@ jobs:
           persist-credentials: false
       - id: plan
         shell: bash
-        run: echo "matrix=$(./scripts/ci-plan.sh)" >> "$GITHUB_OUTPUT"
+        run: |
+          matrix="$(./scripts/ci-plan.sh)"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
         env:
           RELEASE_LINUX: ${{ inputs.linux }}
           RELEASE_MACOS: ${{ inputs.macos }}
