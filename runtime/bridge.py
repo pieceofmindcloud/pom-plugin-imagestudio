@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 
-PREFIX = "/api/ui/plugins/comfyui/proxy"
+PREFIX = "/api/ui/plugins/imagestudio/proxy"
 MAX_BODY = 2 * 1024 * 1024 * 1024
 HOP_BY_HOP = ("host", "connection", "keep-alive", "x-pom-plugin-token", "authorization", "cookie",
               "x-forwarded-prefix", "content-length", "transfer-encoding", "upgrade", "origin")

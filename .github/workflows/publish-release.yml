@@ -93,8 +93,8 @@ jobs:
         with:
           name: plugin-${{ matrix.name }}
           path: |
-            dist-release/pom-plugin-comfyui-${{ matrix.platform }}.${{ matrix.ext }}
-            dist-release/pom-plugin-comfyui-${{ matrix.platform }}.metadata.json
+            dist-release/pom-plugin-imagestudio-${{ matrix.platform }}.${{ matrix.ext }}
+            dist-release/pom-plugin-imagestudio-${{ matrix.platform }}.metadata.json
             dist-release/pom-plugin-${{ matrix.platform }}.json
           if-no-files-found: error
           # Os pacotes só passam entre as etapas; a release guarda os definitivos.
@@ -139,7 +139,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist-release
-          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir dist-release --pattern "pom-plugin-comfyui-${PLATFORM}.*"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir dist-release --pattern "pom-plugin-imagestudio-${PLATFORM}.*"
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ matrix.version }}
@@ -150,7 +150,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ matrix.version }}
           PLATFORM: ${{ matrix.platform }}
-          ARTIFACT: dist-release/pom-plugin-comfyui-${{ matrix.platform }}.${{ matrix.ext }}
-          METADATA: dist-release/pom-plugin-comfyui-${{ matrix.platform }}.metadata.json
+          ARTIFACT: dist-release/pom-plugin-imagestudio-${{ matrix.platform }}.${{ matrix.ext }}
+          METADATA: dist-release/pom-plugin-imagestudio-${{ matrix.platform }}.metadata.json
           POM_RELEASE_TOKEN: ${{ secrets.POM_RELEASE_TOKEN }}
           POM_RELEASE_API: ${{ secrets.POM_RELEASE_API }}

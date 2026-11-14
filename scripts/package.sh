@@ -50,7 +50,7 @@ sha256="$(printf '%s\n' "$build_output" | sed -n 's/^sha256=//p')"
 size="$(printf '%s\n' "$build_output" | sed -n 's/^size=//p')"
 target="$(printf '%s\n' "$build_output" | sed -n 's/^target=//p')"
 
-metadata="${output}/pom-plugin-comfyui-${platform}.metadata.json"
+metadata="${output}/pom-plugin-imagestudio-${platform}.metadata.json"
 public_manifest="${output}/pom-plugin-${platform}.json"
 preferences="$(jq -c '.preferences' "$root/release/manifest.json")" || die 'release manifest preferences are invalid'
 feature_set="$(jq -c '.feature_set' "$root/release/manifest.json")" || die 'release manifest feature set is invalid'

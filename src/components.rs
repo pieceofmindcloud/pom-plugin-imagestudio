@@ -306,7 +306,7 @@ mod tests {
     fn assignment(deploy_id: &str, component: &str, path: &Path) -> Value {
         json!({
             "deploy_id": deploy_id, "name": "Z-Image", "component": component,
-            "paths": [path], "plugin_code": "comfyui", "options": {}
+            "paths": [path], "plugin_code": "imagestudio", "options": {}
         })
     }
 

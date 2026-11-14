@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
-const PLUGIN_CODE: &str = "comfyui";
+const PLUGIN_CODE: &str = "imagestudio";
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

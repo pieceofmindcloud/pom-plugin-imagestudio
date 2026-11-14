@@ -9,7 +9,7 @@ type Status = {
   progress?: number;
   mode?: "install" | "update";
 };
-const URL = "/api/ui/plugins/comfyui/proxy/";
+const URL = "/api/ui/plugins/imagestudio/proxy/";
 
 /**
  * ComfyUI, behind POM's own loader and installer (host version 7).

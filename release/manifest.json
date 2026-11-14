@@ -1,9 +1,9 @@
 {
   "schema": 1,
-  "plugin_code": "comfyui",
+  "plugin_code": "imagestudio",
   "plugin_abi": 1,
   "feature_set": [
-    "comfyui.core"
+    "imagestudio.core"
   ],
   "preferences": {
     "features": [

@@ -592,7 +592,7 @@ mod live {
             serde_json::json!({"components": [{
                 "deploy_id": "img-e2e", "name": "E2E", "component": "vae",
                 "files": ["ae.safetensors"], "status": "ready",
-                "node_id": "self", "hostname": "this-machine", "plugin_code": "comfyui"
+                "node_id": "self", "hostname": "this-machine", "plugin_code": "imagestudio"
             }]})
         } else {
             serde_json::json!({"components": []})

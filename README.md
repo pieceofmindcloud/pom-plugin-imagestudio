@@ -1,6 +1,6 @@
 # POM Image Studio (runs ComfyUI)
 
-A POM plugin (`plugin_code: comfyui`) that runs [ComfyUI](https://github.com/comfy-org/ComfyUI)
+A POM plugin (`plugin_code: imagestudio`) that runs [ComfyUI](https://github.com/comfy-org/ComfyUI)
 inside POM, on demand, behind POM's plugin proxy, with nodes that call the
 models the POM cluster serves. User guide: [`docs/getting-started.md`](docs/getting-started.md).
 
@@ -9,7 +9,7 @@ models the POM cluster serves. User guide: [`docs/getting-started.md`](docs/gett
 | Path | What it is |
 |---|---|
 | `src/abi.rs` | C ABI v1 boundary (`create`, `ingest`, `query`, `free_buffer`, `shutdown`) |
-| `src/lib.rs` | entry `pom_comfyui_plugin_v1` and the operation dispatch |
+| `src/lib.rs` | entry `pom_imagestudio_plugin_v1` and the operation dispatch |
 | `src/context.rs` | `host.configure`: gateway, workspace root, host API, preferences |
 | `src/installer.rs` | pinned, SHA-256 verified ComfyUI source and `uv`; managed Python venv; PyTorch for the machine's GPU |
 | `src/supervisor.rs` | install thread, launch flags, the bridge child and its status |

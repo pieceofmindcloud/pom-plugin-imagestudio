@@ -1,5 +1,5 @@
 [package]
-name = "pom-plugin-comfyui"
+name = "pom-plugin-imagestudio"
 version = "0.1.0"
 license = "MIT AND GPL-3.0-only"
 edition = "2021"

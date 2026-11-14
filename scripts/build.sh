@@ -45,9 +45,9 @@ else
 fi
 
 if [[ "$extension" == dll ]]; then
-  artifact="${artifact_dir}/pom_plugin_comfyui.dll"
+  artifact="${artifact_dir}/pom_plugin_imagestudio.dll"
 else
-  artifact="${artifact_dir}/libpom_plugin_comfyui.${extension}"
+  artifact="${artifact_dir}/libpom_plugin_imagestudio.${extension}"
 fi
 
 "$root/scripts/build-ui.sh"
@@ -58,7 +58,7 @@ fi
 [[ -f "$artifact" ]] || die "artifact not found: $artifact"
 
 mkdir -p "$output"
-destination="${output}/pom-plugin-comfyui-${platform}.${extension}"
+destination="${output}/pom-plugin-imagestudio-${platform}.${extension}"
 cp "$artifact" "$destination"
 if command -v shasum >/dev/null 2>&1; then
   sha256="$(shasum -a 256 "$destination" | awk '{print $1}')"

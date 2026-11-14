@@ -100,9 +100,9 @@ _spec.loader.exec_module(pom_remote)
 
 COMPONENTS = [
     {"deploy_id": "img-1", "name": "Z-Image", "component": "diffusion", "files": ["z.safetensors"],
-     "status": "ready", "node_id": "a", "hostname": "gpu-a", "plugin_code": "comfyui"},
+     "status": "ready", "node_id": "a", "hostname": "gpu-a", "plugin_code": "imagestudio"},
     {"deploy_id": "img-1", "name": "Z-Image", "component": "vae", "files": ["ae.safetensors"],
-     "status": "ready", "node_id": "c", "hostname": "gpu-c", "plugin_code": "comfyui"},
+     "status": "ready", "node_id": "c", "hostname": "gpu-c", "plugin_code": "imagestudio"},
 ]
 
 

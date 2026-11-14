@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use supervisor::Supervisor;
 
-pub const PLUGIN_CODE: &str = "comfyui";
+pub const PLUGIN_CODE: &str = "imagestudio";
 const UI_MANIFEST: &str = include_str!("../ui/manifest.json");
 
 include!(concat!(env!("OUT_DIR"), "/ui_assets.rs"));
@@ -29,7 +29,7 @@ include!(concat!(env!("OUT_DIR"), "/ui_assets.rs"));
 ///
 /// Returns a pointer to a static; the host only reads it.
 #[no_mangle]
-pub unsafe extern "C" fn pom_comfyui_plugin_v1() -> *const abi::PluginApiV1 {
+pub unsafe extern "C" fn pom_imagestudio_plugin_v1() -> *const abi::PluginApiV1 {
     &abi::API
 }
 
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn entry_point_is_named_after_the_plugin_code() {
-        let api = unsafe { &*pom_comfyui_plugin_v1() };
+        let api = unsafe { &*pom_imagestudio_plugin_v1() };
         assert_eq!(api.abi_version, abi::ABI_VERSION);
     }
 
