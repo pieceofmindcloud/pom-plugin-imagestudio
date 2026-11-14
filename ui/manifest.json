@@ -1,6 +1,6 @@
 {
   "schema": "pom-plugin-ui/v1",
-  "plugin_code": "comfyui",
+  "plugin_code": "imagestudio",
   "lifecycle": "on_demand",
   "icon_image": "ui/icon.png",
   "description": {
